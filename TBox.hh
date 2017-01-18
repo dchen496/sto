@@ -90,6 +90,21 @@ public:
         w << "}";
     }
 
+    int log_entry_size(TransItem &item) {
+        return sizeof(T);
+    }
+    int write_log_entry(TransItem &item, char *buf) {
+        *(T *) buf = item.template write_value<T>();
+        return sizeof(T);
+    }
+    bool apply_log_entry(char *entry, TransactionTid::type log_tid) {
+        if (!vers_.lock_if_older(version_type(log_tid)))
+            return false;
+        v_.write(std::move(*(T *) entry));
+        vers_.set_version_unlock(log_tid);
+        return true;
+    }
+
 protected:
     version_type vers_;
     W v_;

@@ -101,6 +101,21 @@ public:
         type vv = v;
         return bool_cmpxchg(&v, vv & ~lock_bit, vv | lock_bit | here);
     }
+    static bool lock_if_older(type& oldv, type& newv) {
+        return lock_if_older(oldv, newv, TThread::id());
+    }
+    static bool lock_if_older(type& oldv, type newv, int here) {
+        while (true) {
+            type vv = oldv;
+            if (vv >= newv)
+                return false;
+            if (bool_cmpxchg(&oldv, vv & ~lock_bit, vv | lock_bit | here))
+                break;
+            relax_fence();
+        }
+        acquire_fence();
+        return true;
+    }
     static void lock(type& v) {
         while (!try_lock(v))
             relax_fence();
@@ -266,6 +281,12 @@ public:
     bool try_lock(int here) {
         return TransactionTid::try_lock(v_, here);
     }
+    bool lock_if_older(TVersion new_v) {
+        return TransactionTid::lock_if_older(v_, new_v.v_);
+    }
+    bool lock_if_older(TVersion new_v, int here) {
+        return TransactionTid::lock_if_older(v_, new_v.v_, here);
+    }
     void lock() {
         TransactionTid::lock(v_);
     }
@@ -387,6 +408,12 @@ public:
     }
     bool try_lock(int here) {
         return TransactionTid::try_lock(v_, here);
+    }
+    bool lock_if_older(TNonopaqueVersion new_v) {
+        return TransactionTid::lock_if_older(v_, new_v.v_);
+    }
+    bool lock_if_older(TNonopaqueVersion new_v, int here) {
+        return TransactionTid::lock_if_older(v_, new_v.v_, here);
     }
     void lock() {
         TransactionTid::lock(v_);
@@ -577,6 +604,20 @@ public:
         (void) item, (void) committed;
     }
     virtual void print(std::ostream& w, const TransItem& item) const;
+
+    // types are not logged by default
+    virtual int log_entry_size(TransItem &item) {
+        (void) item;
+        return 0;
+    }
+    virtual int write_log_entry(TransItem &item, char *buf) {
+        (void) item, (void) buf;
+        return 0;
+    }
+    virtual bool apply_log_entry(char *entry, TransactionTid::type log_tid) {
+        (void) entry, (void) log_tid;
+        return false;
+    }
 };
 
 typedef TObject Shared;

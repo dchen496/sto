@@ -9,6 +9,9 @@ Transaction::epoch_state __attribute__((aligned(128))) Transaction::global_epoch
 };
 __thread Transaction *TThread::txn = nullptr;
 std::function<void(threadinfo_t::epoch_type)> Transaction::epoch_advance_callback;
+bool Transaction::log_enable;
+std::vector<int> log_sync_fds;
+
 TransactionTid::type __attribute__((aligned(128))) Transaction::_TID = 2 * TransactionTid::increment_value;
    // reserve TransactionTid::increment_value for prepopulated
 
@@ -198,13 +201,66 @@ void Transaction::stop(bool committed, unsigned* writeset, unsigned nwriteset) {
         }
     }
 
+    // log this transaction's writeset to the current thread's log buffer
+    if (any_writes_ && committed && log_enable) {
+        append_log_entry(writeset, nwriteset);
+    }
+
 after_unlock:
-    // TODO: this will probably mess up with nested transactions
     threadinfo_t& thr = tinfo[TThread::id()];
+
+    // TODO: this will probably mess up with nested transactions
     if (thr.trans_end_callback)
         thr.trans_end_callback();
     // XXX should reset trans_end_callback after calling it...
     state_ = s_aborted + committed;
+}
+
+void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
+    threadinfo_t& thr = tinfo[TThread::id()];
+
+    if (STO_SORT_WRITESET) {
+        std::cerr << "logging does not support sorted writeset" << std::endl;
+        assert(false);
+    }
+
+    // compute log entry size first
+    uint64_t size = sizeof(tid_type) + sizeof(uint64_t); // TID and number of entries
+    uint64_t nentries = 0;
+    TransItem* it;
+    for (unsigned* idxit = writeset; idxit < writeset + nwriteset; idxit++) {
+        if (*idxit < tset_initial_capacity)
+            it = &tset0_[*idxit];
+        else
+            it = &tset_[*idxit / tset_chunk][*idxit % tset_chunk];
+        if (!it->has_write()) // always false unless a user turns it off in install()/check()
+            continue;
+        nentries++;
+        size += it->owner()->log_entry_size(*it);
+    }
+
+    // reserve space in buffer
+    // XXX: currently no-op right now, we do a blocking send every time
+    char *ptr = thr.log_buf;
+    assert(size < STO_LOG_BUF_SIZE);
+
+    // write log entry to buffer
+    *(tid_type *) ptr = commit_tid();
+    ptr += sizeof(tid_type);
+    *(uint64_t *) ptr = nentries;
+    ptr += sizeof(uint64_t);
+    for (unsigned* idxit = writeset; idxit < writeset + nwriteset; idxit++) {
+        if (*idxit < tset_initial_capacity)
+            it = &tset0_[*idxit];
+        else
+            it = &tset_[*idxit / tset_chunk][*idxit % tset_chunk];
+        if (!it->has_write()) // always false unless a user turns it off in install()/check()
+            continue;
+        ptr += it->owner()->write_log_entry(*it, ptr);
+    }
+
+    // XXX: only call this when the buffer is actually full
+    // thr.push_log_buffer();
 }
 
 bool Transaction::try_commit() {

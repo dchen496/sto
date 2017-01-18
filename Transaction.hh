@@ -67,6 +67,8 @@
 #endif
 #endif
 
+#define STO_LOG_BUF_SIZE (1 << 20)
+
 #include "config.h"
 
 #define MAX_THREADS 32
@@ -179,8 +181,14 @@ struct __attribute__((aligned(128))) threadinfo_t {
     std::function<void(void)> trans_start_callback;
     std::function<void(void)> trans_end_callback;
     txp_counters p_;
+    char *log_buf;
+    std::vector<int> log_fds;
+
     threadinfo_t()
-        : epoch(0) {
+        : epoch(0), log_buf(nullptr) {
+    }
+    ~threadinfo_t() {
+        delete[] log_buf;
     }
 };
 
@@ -207,6 +215,8 @@ private:
 public:
 
     static std::function<void(threadinfo_t::epoch_type)> epoch_advance_callback;
+    static bool log_enable;
+    static std::vector<int> log_sync_fds;
 
     static txp_counters txp_counters_combined() {
         txp_counters out;
@@ -262,6 +272,66 @@ public:
 #define TXP_INCREMENT(p) Transaction::txp_account<(p)>(1)
 #define TXP_ACCOUNT(p, n) Transaction::txp_account<(p)>((n))
 
+    static void init_logging(unsigned num_threads, std::vector<std::string> hosts, int start_port) {
+        assert(num_threads <= MAX_THREADS);
+        assert(num_threads == hosts.size());
+        log_enable = true;
+
+        for (unsigned i = 0; i < hosts.size(); i++) {
+          struct sockaddr_in addr;
+          addr.sin_family = AF_INET;
+          addr.sin_addr.s_addr = inet_addr(hosts[i].c_str());
+          addr.sin_port = start_port;
+          int fd = socket(AF_INET, SOCK_STREAM, 0);
+          if (fd < 0) {
+              throw std::string("couldn't create socket");
+          }
+          if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+              throw std::string("couldn't connect to ") + hosts[i];
+          }
+          log_sync_fds.push_back(fd);
+        }
+
+        for (unsigned i = 0; i < num_threads; i++) {
+            threadinfo_t &thr = tinfo[i];
+            thr.log_buf = new char[STO_LOG_BUF_SIZE];
+
+            for (unsigned j = 0; j < hosts.size(); j++) {
+                int fd = socket(AF_INET, SOCK_STREAM, 0);
+                if (fd < 0) {
+                    throw std::string("couldn't create socket");
+                }
+
+                struct sockaddr_in addr;
+                addr.sin_family = AF_INET;
+                addr.sin_addr.s_addr = inet_addr(hosts[j].c_str());
+                addr.sin_port = start_port + 1 + i;
+                if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+                    throw std::string("couldn't connect to ") + hosts[j];
+                }
+                thr.log_fds.push_back(fd);
+            }
+        }
+    }
+
+    static void stop_logging() {
+        log_enable = false;
+        for (int fd : log_sync_fds) {
+          close(fd);
+        }
+        log_sync_fds.clear();
+        for (int i = 0; i < MAX_THREADS; i++) {
+            threadinfo_t &thr = tinfo[i];
+            if (thr.log_buf != nullptr) {
+                delete[] thr.log_buf;
+                thr.log_buf = nullptr;
+                for (int fd : thr.log_fds) {
+                    close(fd);
+                }
+                thr.log_fds.clear();
+            }
+        }
+    }
 
 private:
     static constexpr unsigned tset_chunk = 512;
@@ -645,6 +715,7 @@ private:
 
     void hard_check_opacity(TransItem* item, TransactionTid::type t);
     void stop(bool committed, unsigned* writes, unsigned nwrites);
+    void append_log_entry(unsigned* writes, unsigned nwrites);
 
     friend class TransProxy;
     friend class TransItem;
