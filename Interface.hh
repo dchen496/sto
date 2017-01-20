@@ -614,8 +614,9 @@ public:
         (void) item, (void) buf;
         return 0;
     }
-    virtual bool apply_log_entry(char *entry, TransactionTid::type log_tid) {
+    virtual bool apply_log_entry(char *entry, TransactionTid::type log_tid, int &bytes_read) {
         (void) entry, (void) log_tid;
+        bytes_read = 0;
         return false;
     }
 };

@@ -10,7 +10,9 @@ Transaction::epoch_state __attribute__((aligned(128))) Transaction::global_epoch
 __thread Transaction *TThread::txn = nullptr;
 std::function<void(threadinfo_t::epoch_type)> Transaction::epoch_advance_callback;
 bool Transaction::log_enable;
-std::vector<int> log_sync_fds;
+std::vector<int> Transaction::log_sync_fds;
+std::unordered_map<void *, uint64_t> Transaction::ptr_to_object_id;
+std::unordered_map<uint64_t, void *> Transaction::object_id_to_ptr;
 
 TransactionTid::type __attribute__((aligned(128))) Transaction::_TID = 2 * TransactionTid::increment_value;
    // reserve TransactionTid::increment_value for prepopulated
@@ -37,6 +39,72 @@ Transaction::~Transaction() {
     for (unsigned i = 0; i != arraysize(tset_); ++i, live += tset_chunk)
         if (live != tset_[i])
             delete[] tset_[i];
+}
+
+void Transaction::init_logging(unsigned num_threads, std::vector<std::string> hosts, int start_port) {
+   assert(num_threads <= MAX_THREADS);
+   log_enable = true;
+
+   /*
+   for (unsigned i = 0; i < hosts.size(); i++) {
+     struct sockaddr_in addr;
+     addr.sin_family = AF_INET;
+     addr.sin_addr.s_addr = inet_addr(hosts[i].c_str());
+     addr.sin_port = htons(start_port);
+     int fd = socket(AF_INET, SOCK_STREAM, 0);
+     if (fd < 0) {
+         throw std::string("couldn't create socket");
+     }
+     if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+         throw std::string("couldn't connect to ") + hosts[i];
+     }
+     log_sync_fds.push_back(fd);
+   }
+   */
+
+   for (unsigned i = 0; i < num_threads; i++) {
+       threadinfo_t &thr = tinfo[i];
+       thr.log_buf = new char[STO_LOG_BUF_SIZE];
+
+       for (unsigned j = 0; j < hosts.size(); j++) {
+           int fd = socket(AF_INET, SOCK_STREAM, 0);
+           if (fd < 0) {
+              std::cerr << "couldn't create socket\n";
+              assert(false);
+              return;
+           }
+
+           struct sockaddr_in addr;
+           addr.sin_family = AF_INET;
+           addr.sin_addr.s_addr = inet_addr(hosts[j].c_str());
+           addr.sin_port = htons(start_port + i);
+           if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+               std::cerr << "couldn't connect to " << hosts[j] << "\n";
+               assert(false);
+               return;
+           }
+           thr.log_fds.push_back(fd);
+       }
+   }
+}
+
+void Transaction::stop_logging() {
+    log_enable = false;
+    for (int fd : log_sync_fds) {
+      close(fd);
+    }
+    log_sync_fds.clear();
+    for (int i = 0; i < MAX_THREADS; i++) {
+        threadinfo_t &thr = tinfo[i];
+        if (thr.log_buf != nullptr) {
+            delete[] thr.log_buf;
+            thr.log_buf = nullptr;
+            for (int fd : thr.log_fds) {
+                close(fd);
+            }
+            thr.log_fds.clear();
+        }
+    }
 }
 
 void Transaction::refresh_tset_chunk() {
@@ -225,7 +293,7 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
     }
 
     // compute log entry size first
-    uint64_t size = sizeof(tid_type) + sizeof(uint64_t); // TID and number of entries
+    uint64_t size = sizeof(tid_type) + 2 * sizeof(uint64_t); // TID, number of entries, object id
     uint64_t nentries = 0;
     TransItem* it;
     for (unsigned* idxit = writeset; idxit < writeset + nwriteset; idxit++) {
@@ -246,8 +314,14 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
 
     // write log entry to buffer
     *(tid_type *) ptr = commit_tid();
+#if STO_DEBUG_TXN_LOG
+    std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << *(tid_type *) ptr << ' ';
+#endif
     ptr += sizeof(tid_type);
     *(uint64_t *) ptr = nentries;
+#if STO_DEBUG_TXN_LOG
+    std::cout << "N=" << *(uint64_t *) ptr << ' ';
+#endif
     ptr += sizeof(uint64_t);
     for (unsigned* idxit = writeset; idxit < writeset + nwriteset; idxit++) {
         if (*idxit < tset_initial_capacity)
@@ -256,11 +330,31 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
             it = &tset_[*idxit / tset_chunk][*idxit % tset_chunk];
         if (!it->has_write()) // always false unless a user turns it off in install()/check()
             continue;
-        ptr += it->owner()->write_log_entry(*it, ptr);
+
+        *(uint64_t *) ptr = ptr_to_object_id[(void *) it->owner()];
+#if STO_DEBUG_TXN_LOG
+        std::cout << "(" << std::hex << std::setw(2) << *(uint64_t *) ptr << " ";
+#endif
+        ptr += sizeof(uint64_t);
+
+        int nb = it->owner()->write_log_entry(*it, ptr);
+#if STO_DEBUG_TXN_LOG
+        for (int i = 0; i < nb; i++) {
+            std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) ptr[i];
+        }
+        std::cout << ") ";
+#endif
+        ptr += nb;
     }
 
+#if STO_DEBUG_TXN_LOG
+        std::cout << '\n';
+#endif
+
     // XXX: only call this when the buffer is actually full
-    // thr.push_log_buffer();
+    for (int i = 0; i < thr.log_fds.size(); i++) {
+        write(thr.log_fds[i], thr.log_buf, ptr - thr.log_buf);
+    }
 }
 
 bool Transaction::try_commit() {

@@ -10,7 +10,9 @@
 #include <type_traits>
 #include <unistd.h>
 #include <iostream>
+#include <iomanip>
 #include <sstream>
+#include <unordered_map>
 
 #ifndef STO_PROFILE_COUNTERS
 #define STO_PROFILE_COUNTERS 0
@@ -68,6 +70,11 @@
 #endif
 
 #define STO_LOG_BUF_SIZE (1 << 20)
+
+#define STO_DEBUG_TXN_LOG 1
+#ifndef STO_DEBUG_TXN_LOG
+#define STO_DEBUG_TXN_LOG 0
+#endif
 
 #include "config.h"
 
@@ -217,6 +224,8 @@ public:
     static std::function<void(threadinfo_t::epoch_type)> epoch_advance_callback;
     static bool log_enable;
     static std::vector<int> log_sync_fds;
+    static std::unordered_map<void *, uint64_t> ptr_to_object_id;
+    static std::unordered_map<uint64_t, void *> object_id_to_ptr;
 
     static txp_counters txp_counters_combined() {
         txp_counters out;
@@ -272,65 +281,21 @@ public:
 #define TXP_INCREMENT(p) Transaction::txp_account<(p)>(1)
 #define TXP_ACCOUNT(p, n) Transaction::txp_account<(p)>((n))
 
-    static void init_logging(unsigned num_threads, std::vector<std::string> hosts, int start_port) {
-        assert(num_threads <= MAX_THREADS);
-        assert(num_threads == hosts.size());
-        log_enable = true;
+    static void init_logging(unsigned num_threads, std::vector<std::string> hosts, int start_port);
+    static void stop_logging();
+    static void register_object(TObject &obj, uint64_t id) {
+      void *ptr = &obj;
+      assert(ptr_to_object_id.find(ptr) == ptr_to_object_id.end());
+      ptr_to_object_id[ptr] = id;
+      object_id_to_ptr[id] = ptr;
 
-        for (unsigned i = 0; i < hosts.size(); i++) {
-          struct sockaddr_in addr;
-          addr.sin_family = AF_INET;
-          addr.sin_addr.s_addr = inet_addr(hosts[i].c_str());
-          addr.sin_port = start_port;
-          int fd = socket(AF_INET, SOCK_STREAM, 0);
-          if (fd < 0) {
-              throw std::string("couldn't create socket");
-          }
-          if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-              throw std::string("couldn't connect to ") + hosts[i];
-          }
-          log_sync_fds.push_back(fd);
-        }
-
-        for (unsigned i = 0; i < num_threads; i++) {
-            threadinfo_t &thr = tinfo[i];
-            thr.log_buf = new char[STO_LOG_BUF_SIZE];
-
-            for (unsigned j = 0; j < hosts.size(); j++) {
-                int fd = socket(AF_INET, SOCK_STREAM, 0);
-                if (fd < 0) {
-                    throw std::string("couldn't create socket");
-                }
-
-                struct sockaddr_in addr;
-                addr.sin_family = AF_INET;
-                addr.sin_addr.s_addr = inet_addr(hosts[j].c_str());
-                addr.sin_port = start_port + 1 + i;
-                if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-                    throw std::string("couldn't connect to ") + hosts[j];
-                }
-                thr.log_fds.push_back(fd);
-            }
-        }
     }
-
-    static void stop_logging() {
-        log_enable = false;
-        for (int fd : log_sync_fds) {
-          close(fd);
-        }
-        log_sync_fds.clear();
-        for (int i = 0; i < MAX_THREADS; i++) {
-            threadinfo_t &thr = tinfo[i];
-            if (thr.log_buf != nullptr) {
-                delete[] thr.log_buf;
-                thr.log_buf = nullptr;
-                for (int fd : thr.log_fds) {
-                    close(fd);
-                }
-                thr.log_fds.clear();
-            }
-        }
+    static void clear_registered_objects() {
+      ptr_to_object_id.clear();
+      object_id_to_ptr.clear();
+    }
+    static TObject &get_registered_object(uint64_t id) {
+      return *(TObject *) object_id_to_ptr[id];
     }
 
 private:

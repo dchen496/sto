@@ -91,15 +91,19 @@ public:
     }
 
     int log_entry_size(TransItem &item) {
+        (void) item;
         return sizeof(T);
     }
     int write_log_entry(TransItem &item, char *buf) {
+        (void) item, (void) buf;
         *(T *) buf = item.template write_value<T>();
         return sizeof(T);
     }
-    bool apply_log_entry(char *entry, TransactionTid::type log_tid) {
-        if (!vers_.lock_if_older(version_type(log_tid)))
+    bool apply_log_entry(char *entry, TransactionTid::type log_tid, int &bytes_read) {
+        bytes_read = sizeof(T);
+        if (!vers_.lock_if_older(version_type(log_tid))) {
             return false;
+        }
         v_.write(std::move(*(T *) entry));
         vers_.set_version_unlock(log_tid);
         return true;
