@@ -67,7 +67,7 @@ OPTFLAGS += -g -pg -fno-inline
 endif
 
 PROGRAMS = concurrent singleelems list1 vector pqueue rbtree trans_test ht_mt pqVsIt iterators single predicates ex-counter $(UNIT_PROGRAMS)
-UNIT_PROGRAMS = unit-tarray unit-tintpredicate unit-tcounter unit-tbox unit-tbox-log unit-tbox-log-backup unit-tgeneric unit-rcu unit-tvector unit-tvector-nopred
+UNIT_PROGRAMS = unit-tarray unit-tintpredicate unit-tcounter unit-tbox unit-tbox-primary unit-tbox-backup unit-tgeneric unit-rcu unit-tvector unit-tvector-nopred
 
 all: $(PROGRAMS)
 
@@ -133,10 +133,10 @@ unit-tcounter: unit-tcounter.o $(STO_DEPS)
 unit-tbox: unit-tbox.o $(STO_DEPS)
 	$(CXX) $(CXXFLAGS) $(OPTFLAGS) -o $@ $< $(STO_OBJS) $(LDFLAGS) $(LIBS)
 
-unit-tbox-log: unit-tbox-log.o $(STO_DEPS)
+unit-tbox-primary: unit-tbox-primary.o $(STO_DEPS)
 	$(CXX) $(CXXFLAGS) $(OPTFLAGS) -o $@ $< $(STO_OBJS) $(LDFLAGS) $(LIBS)
 
-unit-tbox-log-backup: unit-tbox-log-backup.o $(STO_DEPS)
+unit-tbox-backup: unit-tbox-backup.o $(STO_DEPS)
 	$(CXX) $(CXXFLAGS) $(OPTFLAGS) -o $@ $< $(STO_OBJS) $(LDFLAGS) $(LIBS)
 
 unit-tgeneric: unit-tgeneric.o $(STO_DEPS)

@@ -69,18 +69,16 @@ void Transaction::init_logging(unsigned num_threads, std::vector<std::string> ho
        for (unsigned j = 0; j < hosts.size(); j++) {
            int fd = socket(AF_INET, SOCK_STREAM, 0);
            if (fd < 0) {
-              std::cerr << "couldn't create socket\n";
-              assert(false);
-              return;
+               perror("couldn't create socket");
+               return;
            }
 
-           struct sockaddr_in addr;
+           struct sockaddr_in addr{};
            addr.sin_family = AF_INET;
            addr.sin_addr.s_addr = inet_addr(hosts[j].c_str());
            addr.sin_port = htons(start_port + i);
            if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-               std::cerr << "couldn't connect to " << hosts[j] << "\n";
-               assert(false);
+               perror("couldn't connect to backup");
                return;
            }
            thr.log_fds.push_back(fd);
@@ -352,8 +350,11 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
 #endif
 
     // XXX: only call this when the buffer is actually full
-    for (int i = 0; i < thr.log_fds.size(); i++) {
-        write(thr.log_fds[i], thr.log_buf, ptr - thr.log_buf);
+    for (unsigned i = 0; i < thr.log_fds.size(); i++) {
+        int len = ptr - thr.log_buf;
+        if (write(thr.log_fds[i], thr.log_buf, len) < len) {
+            perror("short write");
+        }
     }
 }
 

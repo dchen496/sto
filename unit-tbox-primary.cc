@@ -10,7 +10,7 @@
 void testSimpleInt() {
     TBox<int> f;
     Transaction::register_object(f, 0);
-    Transaction::init_logging(4, {"localhost"}, 2000);
+    Transaction::init_logging(4, {"127.0.0.1"}, 2000);
 
     {
         TransactionGuard t;
