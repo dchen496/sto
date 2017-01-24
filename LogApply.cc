@@ -4,16 +4,24 @@
 pthread_t LogApply::apply_threads[MAX_THREADS];
 LogApply::ThreadArgs LogApply::apply_thread_args[MAX_THREADS];
 bool LogApply::run;
+bool LogApply::debug_txn_log = STO_DEBUG_TXN_LOG;
 
-void LogApply::listen(unsigned num_threads, int start_port) {
+int LogApply::listen(unsigned num_threads, int start_port) {
     run = true;
 
     for (unsigned i = 0; i < num_threads; i++) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
             perror("couldn't create socket");
+            return -1;
+        }
+        /*
+        int enable = 1;
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+            perror("couldn't set socket options");
             return;
         }
+        */
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -21,7 +29,7 @@ void LogApply::listen(unsigned num_threads, int start_port) {
         addr.sin_port = htons(start_port + i);
         if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
             perror("couldn't bind to socket");
-            return;
+            return -1;
         }
 
         ThreadArgs args;
@@ -31,15 +39,42 @@ void LogApply::listen(unsigned num_threads, int start_port) {
 
         pthread_create(&apply_threads[i], nullptr, &applier, (void *) &apply_thread_args[i]);
     }
-    for (unsigned i = 0; i < num_threads; i++) {
+    for (unsigned i = 0; i < num_threads; i++)
         pthread_join(apply_threads[i], nullptr);
-    }
+    run = false;
+    return 0;
 }
 
 void LogApply::stop() {
     run = false;
 }
 
+static int read_all(int fd, void *ptr, int len) {
+    char *p = (char *) ptr;
+    int i = len;
+    while (i > 0) {
+        int n = read(fd, p, i);
+        if (n <= 0) {
+            if (n < 0)
+                perror("error reading from socket");
+            return n;
+        }
+        p += n;
+        i -= n;
+    }
+    return len;
+}
+
+
+
+/*
+    Log batch format:
+    - Length of batch (8 bytes, not included in length)
+    - For each transaction:
+        - Transaction ID (8 bytes)
+        - Number of entries/writes (8 bytes)
+        - List of entries (type specific format)
+*/
 void *LogApply::applier(void *argsptr) {
     ThreadArgs &args = *(ThreadArgs *) argsptr;
     TThread::set_id(args.thread_id);
@@ -56,17 +91,29 @@ void *LogApply::applier(void *argsptr) {
 
     char *buf = new char[STO_LOG_BUF_SIZE];
     while (run) {
-        int n = read(fd, buf, STO_LOG_BUF_SIZE);
-        if (n < 0) {
-            perror("error reading from socket");
-            return nullptr;
-        }
-        if (n == 0) {
-            return nullptr;
-        }
+        uint64_t batch_len;
+        int n;
 
-        process_batch(buf);
+        n = read_all(fd, (void *) &batch_len, sizeof(uint64_t));
+        if (n <= 0) {
+            if (n == 0)
+                break;
+            return nullptr;
+        }
+        assert(batch_len < STO_LOG_MAX_BATCH);
+
+        n = read_all(fd, buf, batch_len);
+        if (n <= 0)
+            return nullptr;
+
+        char *ptr = buf;
+        char *end = buf + batch_len;
+        while (ptr < end) {
+            ptr = process_txn(ptr);
+        }
     }
+    close(fd);
+    close(args.listen_fd);
     delete[] buf;
     return nullptr;
 }
@@ -78,16 +125,14 @@ T scan(char *&buf) {
     return ret;
 }
 
-void LogApply::process_batch(char *batch) {
-    char *ptr = batch;
-
+char *LogApply::process_txn(char *ptr) {
     Transaction::tid_type tid = scan<Transaction::tid_type>(ptr);
     uint64_t nentries = scan<uint64_t>(ptr);
 
-#if STO_DEBUG_TXN_LOG
-    std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << tid << ' ';
-    std::cout << "N=" << nentries << ' ';
-#endif
+    if (debug_txn_log) {
+        std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << tid << ' ';
+        std::cout << "N=" << nentries << ' ';
+    }
 
     for (uint64_t i = 0; i < nentries; i++) {
         uint64_t object_id = scan<uint64_t>(ptr);
@@ -96,16 +141,16 @@ void LogApply::process_batch(char *batch) {
         int bytes_read = 0;
         obj.apply_log_entry(ptr, tid, bytes_read);
 
-#if STO_DEBUG_TXN_LOG
-        std::cout << "(" << std::hex << std::setw(2) << object_id << " ";
-        for (int i = 0; i < bytes_read; i++) {
-            std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) ptr[i];
+        if (debug_txn_log) {
+            std::cout << "(" << std::hex << std::setw(2) << object_id << " ";
+            for (int i = 0; i < bytes_read; i++) {
+                std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) ptr[i];
+            }
+            std::cout << ") ";
         }
-        std::cout << ") ";
-#endif
         ptr += bytes_read;
     }
-#if STO_DEBUG_TXN_LOG
+    if (debug_txn_log)
         std::cout << '\n';
-#endif
+    return ptr;
 }

@@ -13,6 +13,7 @@ bool Transaction::log_enable;
 std::vector<int> Transaction::log_sync_fds;
 std::unordered_map<void *, uint64_t> Transaction::ptr_to_object_id;
 std::unordered_map<uint64_t, void *> Transaction::object_id_to_ptr;
+bool Transaction::debug_txn_log = STO_DEBUG_TXN_LOG;
 
 TransactionTid::type __attribute__((aligned(128))) Transaction::_TID = 2 * TransactionTid::increment_value;
    // reserve TransactionTid::increment_value for prepopulated
@@ -41,7 +42,7 @@ Transaction::~Transaction() {
             delete[] tset_[i];
 }
 
-void Transaction::init_logging(unsigned num_threads, std::vector<std::string> hosts, int start_port) {
+int Transaction::init_logging(unsigned num_threads, std::vector<std::string> hosts, int start_port) {
    assert(num_threads <= MAX_THREADS);
    log_enable = true;
 
@@ -65,12 +66,13 @@ void Transaction::init_logging(unsigned num_threads, std::vector<std::string> ho
    for (unsigned i = 0; i < num_threads; i++) {
        threadinfo_t &thr = tinfo[i];
        thr.log_buf = new char[STO_LOG_BUF_SIZE];
+       thr.log_buf_used = sizeof(uint64_t);
 
        for (unsigned j = 0; j < hosts.size(); j++) {
            int fd = socket(AF_INET, SOCK_STREAM, 0);
            if (fd < 0) {
                perror("couldn't create socket");
-               return;
+               return -1;
            }
 
            struct sockaddr_in addr{};
@@ -79,11 +81,12 @@ void Transaction::init_logging(unsigned num_threads, std::vector<std::string> ho
            addr.sin_port = htons(start_port + i);
            if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
                perror("couldn't connect to backup");
-               return;
+               return -1;
            }
            thr.log_fds.push_back(fd);
        }
    }
+   return 0;
 }
 
 void Transaction::stop_logging() {
@@ -285,10 +288,12 @@ after_unlock:
 void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
     threadinfo_t& thr = tinfo[TThread::id()];
 
+    // XXX fix this
     if (STO_SORT_WRITESET) {
         std::cerr << "logging does not support sorted writeset" << std::endl;
         assert(false);
     }
+
 
     // compute log entry size first
     uint64_t size = sizeof(tid_type) + 2 * sizeof(uint64_t); // TID, number of entries, object id
@@ -306,20 +311,21 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
     }
 
     // reserve space in buffer
-    // XXX: currently no-op right now, we do a blocking send every time
-    char *ptr = thr.log_buf;
-    assert(size < STO_LOG_BUF_SIZE);
+    if (thr.log_buf_used + size > STO_LOG_BUF_SIZE)
+        flush_log_buffer();
+
+    // XXX handle special case if the txn entry is too big
+    assert(thr.log_buf_used + size <= STO_LOG_BUF_SIZE);
+    char *ptr = thr.log_buf + thr.log_buf_used;
 
     // write log entry to buffer
     *(tid_type *) ptr = commit_tid();
-#if STO_DEBUG_TXN_LOG
-    std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << *(tid_type *) ptr << ' ';
-#endif
+    if (debug_txn_log)
+        std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << *(tid_type *) ptr << ' ' << std::dec;
     ptr += sizeof(tid_type);
     *(uint64_t *) ptr = nentries;
-#if STO_DEBUG_TXN_LOG
-    std::cout << "N=" << *(uint64_t *) ptr << ' ';
-#endif
+    if (debug_txn_log)
+        std::cout << "N=" << *(uint64_t *) ptr << ' ';
     ptr += sizeof(uint64_t);
     for (unsigned* idxit = writeset; idxit < writeset + nwriteset; idxit++) {
         if (*idxit < tset_initial_capacity)
@@ -330,31 +336,37 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
             continue;
 
         *(uint64_t *) ptr = ptr_to_object_id[(void *) it->owner()];
-#if STO_DEBUG_TXN_LOG
-        std::cout << "(" << std::hex << std::setw(2) << *(uint64_t *) ptr << " ";
-#endif
+        if(debug_txn_log)
+            std::cout << "(" << std::hex << std::setw(2) << *(uint64_t *) ptr << " " << std::dec;
+
         ptr += sizeof(uint64_t);
 
         int nb = it->owner()->write_log_entry(*it, ptr);
-#if STO_DEBUG_TXN_LOG
-        for (int i = 0; i < nb; i++) {
-            std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) ptr[i];
+        if (debug_txn_log) {
+            for (int i = 0; i < nb; i++) {
+                std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) ptr[i] << std::dec;
+            }
+            std::cout << ") ";
         }
-        std::cout << ") ";
-#endif
         ptr += nb;
     }
-
-#if STO_DEBUG_TXN_LOG
+    if (debug_txn_log)
         std::cout << '\n';
-#endif
 
-    // XXX: only call this when the buffer is actually full
+    thr.log_buf_used = ptr - thr.log_buf;
+}
+
+void Transaction::flush_log_buffer() {
+    threadinfo_t& thr = tinfo[TThread::id()];
+
     for (unsigned i = 0; i < thr.log_fds.size(); i++) {
-        int len = ptr - thr.log_buf;
-        if (write(thr.log_fds[i], thr.log_buf, len) < len) {
+        *(uint64_t *) thr.log_buf = thr.log_buf_used - sizeof(uint64_t);
+        int len = thr.log_buf_used;
+        if (write(thr.log_fds[i], thr.log_buf, (int) len) < len) {
             perror("short write");
         }
+        // reserve space for 8 byte length
+        thr.log_buf_used = sizeof(uint64_t);
     }
 }
 

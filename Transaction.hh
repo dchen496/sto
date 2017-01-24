@@ -70,6 +70,7 @@
 #endif
 
 #define STO_LOG_BUF_SIZE (1 << 20)
+#define STO_LOG_MAX_BATCH (STO_LOG_BUF_SIZE - sizeof(uint64_t))
 
 #define STO_DEBUG_TXN_LOG 1
 #ifndef STO_DEBUG_TXN_LOG
@@ -189,6 +190,7 @@ struct __attribute__((aligned(128))) threadinfo_t {
     std::function<void(void)> trans_end_callback;
     txp_counters p_;
     char *log_buf;
+    int log_buf_used;
     std::vector<int> log_fds;
 
     threadinfo_t()
@@ -217,6 +219,8 @@ public:
         bool run;
     } global_epochs;
     typedef TransactionTid::type tid_type;
+
+    static bool debug_txn_log;
 private:
     static TransactionTid::type _TID;
 public:
@@ -281,7 +285,7 @@ public:
 #define TXP_INCREMENT(p) Transaction::txp_account<(p)>(1)
 #define TXP_ACCOUNT(p, n) Transaction::txp_account<(p)>((n))
 
-    static void init_logging(unsigned num_threads, std::vector<std::string> hosts, int start_port);
+    static int init_logging(unsigned num_threads, std::vector<std::string> hosts, int start_port);
     static void stop_logging();
     static void register_object(TObject &obj, uint64_t id) {
       void *ptr = &obj;
@@ -646,6 +650,8 @@ public:
     void local_srandom(uint32_t state) {
         lrng_state_ = state;
     }
+
+    static void flush_log_buffer();
 
 private:
     enum {
