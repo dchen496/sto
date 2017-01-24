@@ -36,8 +36,8 @@
 /unit-rcu
 /unit-tarray
 /unit-tbox
-/unit-tbox-log
-/unit-tbox-log-backup
+/unit-tbox-primary
+/unit-tbox-backup
 /unit-tgeneric
 /unit-tintpredicate
 /unit-tcounter
