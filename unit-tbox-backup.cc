@@ -6,10 +6,13 @@
 #include "TBox.hh"
 #include "LogApply.hh"
 
+const int port = 2000;
+const int niters = 2000000;
+
 void test_simple_int(int batch) {
     TBox<int> f;
     Transaction::register_object(f, 0);
-    assert(LogApply::listen(1, 2000) == 0);
+    assert(LogApply::listen(1, port) == 0);
 
     {
         TransactionGuard t;
@@ -22,26 +25,20 @@ void test_simple_int(int batch) {
 }
 
 void test_many_writes(int batch) {
-    TBox<int> fs[100];
-    int es[100];
-    for (int i = 0; i < 100; i++) {
+    const int n = 100;
+    TBox<int> fs[n];
+    TBox<int> refs[n];
+    for (int i = 0; i < n; i++) {
         Transaction::register_object(fs[i], i);
-        fs[i].nontrans_write(0);
-        es[i] = i;
+        Transaction::register_object(refs[i], i + n);
     }
-    assert(LogApply::listen(1, 2000) == 0);
+    assert(LogApply::listen(1, port) == 0);
 
-    for (int i = 0; i < 1000000; i++) {
-        int a = (i * 17) % 100;
-        int b = (i * 19) % 100;
-        int c = (i * 31) % 100;
-        es[a] = (23 * es[b] + es[c] + 197) % 997;
-    }
-
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < n; i++) {
         TransactionGuard t;
         int f_read = fs[i];
-        assert(f_read == es[i]);
+        int ref_read = refs[i];
+        assert(f_read == ref_read);
     }
     Transaction::clear_registered_objects();
     std::cout << "BACKUP PASS: " << __FUNCTION__ << "(" << batch << ")\n";
@@ -56,10 +53,8 @@ void test_multithreaded(int batch) {
     for (int i = 0; i < n; i++) {
         Transaction::register_object(fs[i], i);
         Transaction::register_object(refs[i], i + n);
-        fs[i].nontrans_write(i);
-        refs[i].nontrans_write(0);
     }
-    assert(LogApply::listen(nthread, 2000) == 0);
+    assert(LogApply::listen(nthread, port) == 0);
 
     for (int i = 0; i < n; i++) {
         TransactionGuard t;
@@ -80,4 +75,5 @@ int main() {
     test_many_writes(1);
     test_multithreaded(0);
     test_multithreaded(1);
+    return 0;
 }
