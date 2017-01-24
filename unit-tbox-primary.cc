@@ -52,7 +52,7 @@ void test_many_writes(int batch) {
         int c = (i * 31) % 100;
         {
             TransactionGuard t;
-            fs[a] = (fs[b] + fs[c]) % 1000;
+            fs[a] = (23 * fs[b] + fs[c] + 197) % 997;
         }
         if (!batch)
             Transaction::flush_log_buffer();
@@ -68,23 +68,27 @@ void test_many_writes(int batch) {
 struct ThreadArgs {
     int id;
     bool batch;
-    TBox<int> (*fs)[100];
+    TBox<int> *fs;
+    int n;
 };
 
 void *test_multithreadedWorker(void *argptr) {
     ThreadArgs &args = *(ThreadArgs *) argptr;
     TThread::set_id(args.id);
-    TBox<int> (&fs)[100] = *args.fs;
+    TBox<int> *fs = args.fs;
+    int n = args.n;
     for (int i = 0; i < 1000000; i++) {
-        int a = (i * 17) % 100;
-        int b = (i * 19) % 100;
-        int c = (i * 31) % 100;
-        {
-            TransactionGuard t;
-            fs[a] = (fs[b] + fs[c]) % 1000;
+        int a = (i * 17) % n;
+        int b = (i * 19) % n;
+        int c = (i * 31) % n;
+
+        try {
+            Sto::start_transaction();
+            fs[a] = (23 * fs[b] + fs[c] + 197) % 997;
+            if (Sto::try_commit() && !args.batch)
+                Transaction::flush_log_buffer();
+        } catch (Transaction::Abort e) {
         }
-        if (!args.batch)
-            Transaction::flush_log_buffer();
     }
     Transaction::flush_log_buffer();
     return nullptr;
@@ -92,33 +96,36 @@ void *test_multithreadedWorker(void *argptr) {
 
 void test_multithreaded(int batch) {
     usleep(500000);
-    TBox<int> fs[100];
-    TBox<int> refs[100];
-    for (int i = 0; i < 100; i++) {
+    const int n = 20;
+    const int nthread = 4;
+    TBox<int> fs[n];
+    TBox<int> refs[n];
+    for (int i = 0; i < n; i++) {
         Transaction::register_object(fs[i], i);
-        Transaction::register_object(refs[i], i + 100);
+        Transaction::register_object(refs[i], i + n);
         fs[i].nontrans_write(i);
         refs[i].nontrans_write(0);
     }
 
-    assert(Transaction::init_logging(4, {"127.0.0.1"}, 2000) == 0);
-    pthread_t thrs[4];
-    ThreadArgs args[4];
-    for (int i = 0; i < 4; i++) {
-        args[i].id = i;
-        args[i].batch = batch;
-        args[i].fs = &fs;
+    assert(Transaction::init_logging(nthread, {"127.0.0.1"}, 2000) == 0);
+    pthread_t thrs[nthread];
+    ThreadArgs args[nthread];
+    for (int i = 0; i < nthread; i++) {
+        args[i] = { .id = i, .batch = batch, .fs = fs, .n = n };
         pthread_create(&thrs[i], nullptr, test_multithreadedWorker, (void *) &args[i]);
     }
-
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < nthread; i++)
         pthread_join(thrs[i], nullptr);
 
     // hacky way of sending the expected values
-    for (int i = 0; i < 100; i++) {
+    {
         TransactionGuard t;
-        refs[i] = fs[i];
+        for (int i = 0; i < n; i++) {
+            refs[i] = fs[i];
+        }
     }
+    Transaction::flush_log_buffer();
+
     printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
     Transaction::stop_logging();
     Transaction::clear_registered_objects();

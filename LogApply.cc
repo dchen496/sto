@@ -1,5 +1,6 @@
 #include "Transaction.hh"
 #include "LogApply.hh"
+#include <vector>
 
 pthread_t LogApply::apply_threads[MAX_THREADS];
 LogApply::ThreadArgs LogApply::apply_thread_args[MAX_THREADS];
@@ -15,13 +16,10 @@ int LogApply::listen(unsigned num_threads, int start_port) {
             perror("couldn't create socket");
             return -1;
         }
-        /*
+
+        // XXX: nice to have for debugging, but maybe not a good idea in general
         int enable = 1;
-        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
-            perror("couldn't set socket options");
-            return;
-        }
-        */
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (void *) &enable, sizeof(int));
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -29,6 +27,10 @@ int LogApply::listen(unsigned num_threads, int start_port) {
         addr.sin_port = htons(start_port + i);
         if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
             perror("couldn't bind to socket");
+            return -1;
+        }
+        if (::listen(fd, 1) < 0) {
+            perror("couldn't listen to socket");
             return -1;
         }
 
@@ -39,8 +41,10 @@ int LogApply::listen(unsigned num_threads, int start_port) {
 
         pthread_create(&apply_threads[i], nullptr, &applier, (void *) &apply_thread_args[i]);
     }
-    for (unsigned i = 0; i < num_threads; i++)
+    for (unsigned i = 0; i < num_threads; i++) {
         pthread_join(apply_threads[i], nullptr);
+        close(apply_thread_args[i].listen_fd);
+    }
     run = false;
     return 0;
 }
@@ -79,42 +83,36 @@ void *LogApply::applier(void *argsptr) {
     ThreadArgs &args = *(ThreadArgs *) argsptr;
     TThread::set_id(args.thread_id);
 
-    if (::listen(args.listen_fd, 1) < 0) {
-        perror("couldn't listen to socket");
-        return nullptr;
-    }
     int fd = accept(args.listen_fd, NULL, NULL);
     if (fd < 0) {
         perror("couldn't accept connection");
         return nullptr;
     }
 
-    char *buf = new char[STO_LOG_BUF_SIZE];
+    std::vector<char> buf;
+    buf.resize(STO_LOG_BUF_SIZE);
     while (run) {
         uint64_t batch_len;
         int n;
 
         n = read_all(fd, (void *) &batch_len, sizeof(uint64_t));
-        if (n <= 0) {
-            if (n == 0)
-                break;
-            return nullptr;
-        }
+        if (n <= 0)
+            break;
         assert(batch_len < STO_LOG_MAX_BATCH);
 
-        n = read_all(fd, buf, batch_len);
-        if (n <= 0)
-            return nullptr;
+        if (batch_len == 0)
+            continue;
 
-        char *ptr = buf;
-        char *end = buf + batch_len;
-        while (ptr < end) {
+        n = read_all(fd, buf.data(), batch_len);
+        if (n <= 0)
+            break;
+
+        char *ptr = buf.data();
+        char *end = ptr + batch_len;
+        while (ptr < end)
             ptr = process_txn(ptr);
-        }
     }
     close(fd);
-    close(args.listen_fd);
-    delete[] buf;
     return nullptr;
 }
 
@@ -144,7 +142,7 @@ char *LogApply::process_txn(char *ptr) {
         if (debug_txn_log) {
             std::cout << "(" << std::hex << std::setw(2) << object_id << " ";
             for (int i = 0; i < bytes_read; i++) {
-                std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) ptr[i];
+                std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) (unsigned char) ptr[i];
             }
             std::cout << ") ";
         }

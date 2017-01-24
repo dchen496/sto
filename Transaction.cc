@@ -344,7 +344,7 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
         int nb = it->owner()->write_log_entry(*it, ptr);
         if (debug_txn_log) {
             for (int i = 0; i < nb; i++) {
-                std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) ptr[i] << std::dec;
+                std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) (unsigned char) ptr[i] << std::dec;
             }
             std::cout << ") ";
         }
@@ -359,15 +359,20 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
 void Transaction::flush_log_buffer() {
     threadinfo_t& thr = tinfo[TThread::id()];
 
+    int batch_len = thr.log_buf_used - sizeof(uint64_t);
+    *(uint64_t *) thr.log_buf = batch_len;
+    int len = thr.log_buf_used;
+
     for (unsigned i = 0; i < thr.log_fds.size(); i++) {
-        *(uint64_t *) thr.log_buf = thr.log_buf_used - sizeof(uint64_t);
-        int len = thr.log_buf_used;
         if (write(thr.log_fds[i], thr.log_buf, (int) len) < len) {
             perror("short write");
         }
-        // reserve space for 8 byte length
-        thr.log_buf_used = sizeof(uint64_t);
     }
+
+    if (debug_txn_log)
+        std::cout << "Thread " << TThread::id() << " flushed " << len << " bytes\n";
+    // reserve space for 8 byte length
+    thr.log_buf_used = sizeof(uint64_t);
 }
 
 bool Transaction::try_commit() {

@@ -292,7 +292,6 @@ public:
       assert(ptr_to_object_id.find(ptr) == ptr_to_object_id.end());
       ptr_to_object_id[ptr] = id;
       object_id_to_ptr[id] = ptr;
-
     }
     static void clear_registered_objects() {
       ptr_to_object_id.clear();

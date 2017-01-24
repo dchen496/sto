@@ -35,7 +35,7 @@ void test_many_writes(int batch) {
         int a = (i * 17) % 100;
         int b = (i * 19) % 100;
         int c = (i * 31) % 100;
-        es[a] = (es[b] + es[c]) % 1000;
+        es[a] = (23 * es[b] + es[c] + 197) % 997;
     }
 
     for (int i = 0; i < 100; i++) {
@@ -49,17 +49,19 @@ void test_many_writes(int batch) {
 }
 
 void test_multithreaded(int batch) {
-    TBox<int> fs[100];
-    TBox<int> refs[100];
-    for (int i = 0; i < 100; i++) {
+    const int n = 20;
+    const int nthread = 4;
+    TBox<int> fs[n];
+    TBox<int> refs[n];
+    for (int i = 0; i < n; i++) {
         Transaction::register_object(fs[i], i);
-        Transaction::register_object(refs[i], i + 100);
+        Transaction::register_object(refs[i], i + n);
         fs[i].nontrans_write(i);
-        refs[i].nontrans_write(-i);
+        refs[i].nontrans_write(0);
     }
-    assert(LogApply::listen(4, 2000) == 0);
+    assert(LogApply::listen(nthread, 2000) == 0);
 
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < n; i++) {
         TransactionGuard t;
         int f_read = fs[i];
         int ref_read = refs[i];
