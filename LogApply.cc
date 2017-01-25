@@ -2,15 +2,22 @@
 #include "LogApply.hh"
 #include <vector>
 
-pthread_t LogApply::apply_threads[MAX_THREADS];
-LogApply::ThreadArgs LogApply::apply_thread_args[MAX_THREADS];
-bool LogApply::run;
 bool LogApply::debug_txn_log = STO_DEBUG_TXN_LOG;
 
-int LogApply::listen(unsigned num_threads, int start_port) {
-    run = true;
+pthread_t LogApply::apply_threads[MAX_THREADS];
+LogApply::ApplyThreadArgs LogApply::apply_thread_args[MAX_THREADS];
+pthread_t LogApply::advance_thread;
+LogApply::AdvanceThreadArgs LogApply::advance_thread_arg;
 
-    for (unsigned i = 0; i < num_threads; i++) {
+bool LogApply::run;
+Transaction::tid_type LogApply::next_tids[MAX_THREADS];
+Transaction::tid_type LogApply::min_next_tid;
+
+int LogApply::listen(unsigned nthreads, int start_port) {
+    run = true;
+    fence();
+
+    for (unsigned i = 0; i < nthreads; i++) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
             perror("couldn't create socket");
@@ -34,18 +41,24 @@ int LogApply::listen(unsigned num_threads, int start_port) {
             return -1;
         }
 
-        ThreadArgs args;
+        ApplyThreadArgs args;
         args.listen_fd = fd;
         args.thread_id = i;
         apply_thread_args[i] = args;
 
         pthread_create(&apply_threads[i], nullptr, &applier, (void *) &apply_thread_args[i]);
     }
-    for (unsigned i = 0; i < num_threads; i++) {
+
+    advance_thread_arg.nthreads = nthreads;
+    pthread_create(&advance_thread, nullptr, &advancer, &advance_thread_arg);
+
+    for (unsigned i = 0; i < nthreads; i++) {
         pthread_join(apply_threads[i], nullptr);
         close(apply_thread_args[i].listen_fd);
     }
+
     run = false;
+    fence();
     return 0;
 }
 
@@ -80,7 +93,7 @@ static int read_all(int fd, void *ptr, int len) {
         - List of entries (type specific format)
 */
 void *LogApply::applier(void *argsptr) {
-    ThreadArgs &args = *(ThreadArgs *) argsptr;
+    ApplyThreadArgs &args = *(ApplyThreadArgs *) argsptr;
     TThread::set_id(args.thread_id);
 
     int fd = accept(args.listen_fd, NULL, NULL);
@@ -91,7 +104,11 @@ void *LogApply::applier(void *argsptr) {
 
     std::vector<char> buf;
     buf.resize(STO_LOG_BUF_SIZE);
-    while (run) {
+    while (true) {
+        fence();
+        if (!run)
+            break;
+
         uint64_t batch_len;
         int n;
 
@@ -150,5 +167,26 @@ char *LogApply::process_txn(char *ptr) {
     }
     if (debug_txn_log)
         std::cout << '\n';
+
+    assert(next_tids[TThread::id()] < tid);
+    next_tids[TThread::id()] = tid;
+    fence();
+
     return ptr;
+}
+
+void *LogApply::advancer(void *argsptr) {
+    AdvanceThreadArgs &args = *(AdvanceThreadArgs *) argsptr;
+    while (true) {
+        fence();
+        if (!run)
+            break;
+
+        usleep(100000);
+        Transaction::tid_type new_min = next_tids[0];
+        for (int i = 1; i < args.nthreads; i++)
+            new_min = std::min(new_min, next_tids[i]);
+        min_next_tid = new_min;
+    }
+    return nullptr;
 }
