@@ -10,7 +10,6 @@ Transaction::epoch_state __attribute__((aligned(128))) Transaction::global_epoch
 __thread Transaction *TThread::txn = nullptr;
 std::function<void(threadinfo_t::epoch_type)> Transaction::epoch_advance_callback;
 bool Transaction::log_enable;
-std::vector<int> Transaction::log_sync_fds;
 std::unordered_map<void *, uint64_t> Transaction::ptr_to_object_id;
 std::unordered_map<uint64_t, void *> Transaction::object_id_to_ptr;
 bool Transaction::debug_txn_log = STO_DEBUG_TXN_LOG;
@@ -46,27 +45,10 @@ int Transaction::init_logging(unsigned num_threads, std::vector<std::string> hos
    assert(num_threads <= MAX_THREADS);
    log_enable = true;
 
-   /*
-   for (unsigned i = 0; i < hosts.size(); i++) {
-     struct sockaddr_in addr;
-     addr.sin_family = AF_INET;
-     addr.sin_addr.s_addr = inet_addr(hosts[i].c_str());
-     addr.sin_port = htons(start_port);
-     int fd = socket(AF_INET, SOCK_STREAM, 0);
-     if (fd < 0) {
-         throw std::string("couldn't create socket");
-     }
-     if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-         throw std::string("couldn't connect to ") + hosts[i];
-     }
-     log_sync_fds.push_back(fd);
-   }
-   */
-
    for (unsigned i = 0; i < num_threads; i++) {
        threadinfo_t &thr = tinfo[i];
        thr.log_buf = new char[STO_LOG_BUF_SIZE];
-       thr.log_buf_used = sizeof(uint64_t);
+       thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
 
        for (unsigned j = 0; j < hosts.size(); j++) {
            int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -91,20 +73,24 @@ int Transaction::init_logging(unsigned num_threads, std::vector<std::string> hos
 
 void Transaction::stop_logging() {
     log_enable = false;
-    for (int fd : log_sync_fds) {
-      close(fd);
-    }
-    log_sync_fds.clear();
+
+    // signal to backups that there are no more log entries
     for (int i = 0; i < MAX_THREADS; i++) {
         threadinfo_t &thr = tinfo[i];
-        if (thr.log_buf != nullptr) {
-            delete[] thr.log_buf;
-            thr.log_buf = nullptr;
-            for (int fd : thr.log_fds) {
-                close(fd);
-            }
-            thr.log_fds.clear();
+        for (int fd : thr.log_fds)
+            shutdown(fd, SHUT_WR);
+    }
+
+    // wait for backups to finish sending acks, then close the socket
+    for (int i = 0; i < MAX_THREADS; i++) {
+        threadinfo_t &thr = tinfo[i];
+        for (int fd : thr.log_fds) {
+            Transaction::tid_type tid;
+            while (read(fd, &tid, sizeof(tid)) > 0)
+                ;
+            close(fd);
         }
+        thr.log_fds.clear();
     }
 }
 
@@ -271,9 +257,8 @@ void Transaction::stop(bool committed, unsigned* writeset, unsigned nwriteset) {
     }
 
     // log this transaction's writeset to the current thread's log buffer
-    if (any_writes_ && committed && log_enable) {
+    if (any_writes_ && committed && log_enable)
         append_log_entry(writeset, nwriteset);
-    }
 
 after_unlock:
     threadinfo_t& thr = tinfo[TThread::id()];
@@ -312,11 +297,13 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
 
     // reserve space in buffer
     if (thr.log_buf_used + size > STO_LOG_BUF_SIZE)
-        flush_log_buffer();
+        flush_log_batch();
 
     // XXX handle special case if the txn entry is too big
     assert(thr.log_buf_used + size <= STO_LOG_BUF_SIZE);
     char *ptr = thr.log_buf + thr.log_buf_used;
+
+    thr.max_logged_tid = commit_tid();
 
     // write log entry to buffer
     *(tid_type *) ptr = commit_tid();
@@ -354,25 +341,32 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
         std::cout << '\n';
 
     thr.log_buf_used = ptr - thr.log_buf;
+
+    // update tid
+    update_synced_tid();
 }
 
-void Transaction::flush_log_buffer() {
+// See LogApply.cc for the wire format
+void Transaction::flush_log_batch() {
     threadinfo_t& thr = tinfo[TThread::id()];
 
-    int batch_len = thr.log_buf_used - sizeof(uint64_t);
-    *(uint64_t *) thr.log_buf = batch_len;
+    int batch_len = thr.log_buf_used;
+    uint64_t *log_buf = (uint64_t *) thr.log_buf;
+    log_buf[0] = batch_len;
+    log_buf[1] = thr.max_logged_tid;
     int len = thr.log_buf_used;
 
     for (unsigned i = 0; i < thr.log_fds.size(); i++) {
-        if (write(thr.log_fds[i], thr.log_buf, (int) len) < len) {
+        if (write(thr.log_fds[i], thr.log_buf, (int) len) < len)
             perror("short write");
-        }
     }
 
     if (debug_txn_log)
         std::cout << "Thread " << TThread::id() << " flushed " << len << " bytes\n";
-    // reserve space for 8 byte length
-    thr.log_buf_used = sizeof(uint64_t);
+    thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
+}
+
+void Transaction::update_synced_tid() {
 }
 
 bool Transaction::try_commit() {

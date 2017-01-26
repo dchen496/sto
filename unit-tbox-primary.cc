@@ -10,9 +10,10 @@
 const std::string host = "127.0.0.1";
 const int port = 2000;
 const int niters = 2000000;
+const int startup_delay = 500000;
 
 void test_simple_int(int batch) {
-    usleep(500000);
+    usleep(startup_delay);
     TBox<int> f;
     Transaction::register_object(f, 0);
     assert(Transaction::init_logging(1, {host}, port) == 0);
@@ -30,10 +31,10 @@ void test_simple_int(int batch) {
             assert(f_read == val);
         }
         if (!batch)
-            Transaction::flush_log_buffer();
+            Transaction::flush_log_batch();
     }
     if (batch)
-        Transaction::flush_log_buffer();
+        Transaction::flush_log_batch();
 
     printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
     Transaction::stop_logging();
@@ -42,7 +43,7 @@ void test_simple_int(int batch) {
 }
 
 void test_many_writes(int batch) {
-    usleep(500000);
+    usleep(startup_delay);
     const int n = 100;
     TBox<int> fs[n];
     TBox<int> refs[n];
@@ -63,9 +64,9 @@ void test_many_writes(int batch) {
             fs[a] = (23 * fs[b] + fs[c] + 197) % 997;
         }
         if (!batch)
-            Transaction::flush_log_buffer();
+            Transaction::flush_log_batch();
     }
-    Transaction::flush_log_buffer();
+    Transaction::flush_log_batch();
 
     {
         TransactionGuard t;
@@ -73,7 +74,7 @@ void test_many_writes(int batch) {
             refs[i] = fs[i];
         }
     }
-    Transaction::flush_log_buffer();
+    Transaction::flush_log_batch();
 
     printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
     Transaction::stop_logging();
@@ -102,16 +103,16 @@ void *test_multithreadedWorker(void *argptr) {
             Sto::start_transaction();
             fs[a] = (23 * fs[b] + fs[c] + 197) % 997;
             if (Sto::try_commit() && !args.batch)
-                Transaction::flush_log_buffer();
+                Transaction::flush_log_batch();
         } catch (Transaction::Abort e) {
         }
     }
-    Transaction::flush_log_buffer();
+    Transaction::flush_log_batch();
     return nullptr;
 }
 
 void test_multithreaded(int batch) {
-    usleep(500000);
+    usleep(startup_delay);
     const int n = 20;
     const int nthread = 4;
     TBox<int> fs[n];
@@ -139,7 +140,7 @@ void test_multithreaded(int batch) {
             refs[i] = fs[i];
         }
     }
-    Transaction::flush_log_buffer();
+    Transaction::flush_log_batch();
 
     printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
     Transaction::stop_logging();

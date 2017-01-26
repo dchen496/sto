@@ -70,7 +70,8 @@
 #endif
 
 #define STO_LOG_BUF_SIZE (1 << 20)
-#define STO_LOG_MAX_BATCH (STO_LOG_BUF_SIZE - sizeof(uint64_t))
+#define STO_LOG_BATCH_HEADER_SIZE (2 * sizeof(uint64_t))
+#define STO_LOG_MAX_BATCH (STO_LOG_BUF_SIZE - STO_LOG_BATCH_HEADER_SIZE)
 
 #define STO_DEBUG_TXN_LOG 1
 #ifndef STO_DEBUG_TXN_LOG
@@ -191,11 +192,18 @@ struct __attribute__((aligned(128))) threadinfo_t {
     txp_counters p_;
     char *log_buf;
     int log_buf_used;
+    TransactionTid::type max_logged_tid;
+    TransactionTid::type max_synced_tid;
     std::vector<int> log_fds;
 
-    threadinfo_t()
-        : epoch(0), log_buf(nullptr) {
+    threadinfo_t() :
+        epoch(0),
+        log_buf(nullptr),
+        log_buf_used(0),
+        max_logged_tid(0),
+        max_synced_tid(0) {
     }
+
     ~threadinfo_t() {
         delete[] log_buf;
     }
@@ -227,7 +235,6 @@ public:
 
     static std::function<void(threadinfo_t::epoch_type)> epoch_advance_callback;
     static bool log_enable;
-    static std::vector<int> log_sync_fds;
     static std::unordered_map<void *, uint64_t> ptr_to_object_id;
     static std::unordered_map<uint64_t, void *> object_id_to_ptr;
 
@@ -650,7 +657,7 @@ public:
         lrng_state_ = state;
     }
 
-    static void flush_log_buffer();
+    static void flush_log_batch();
 
 private:
     enum {
@@ -686,6 +693,7 @@ private:
     void hard_check_opacity(TransItem* item, TransactionTid::type t);
     void stop(bool committed, unsigned* writes, unsigned nwrites);
     void append_log_entry(unsigned* writes, unsigned nwrites);
+    void update_synced_tid();
 
     friend class TransProxy;
     friend class TransItem;
