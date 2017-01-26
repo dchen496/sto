@@ -65,6 +65,13 @@ struct versioned_str_struct : public versioned_str {
   inline void deallocate_rcu(threadinfo& ti) {
     ti.deallocate_rcu(this, this->capacity() + sizeof(versioned_str_struct), memtag_value);
   }
+
+  // Masstree debug printer
+  void print(FILE* f, const char* prefix,
+    int indent, Masstree::Str key, kvtimestamp_t, char* suffix) {
+    fprintf(f, "%s%*s%.*s = versioned_str_struct%s\n",
+        prefix, indent, "", key.len, key.s, suffix);
+  }
 };
 
 template <typename V, typename Box = versioned_value_struct<V>, bool Opacity = true>
@@ -133,6 +140,11 @@ public:
       mythreadinfo.ti->rcu_stop();
     };
 #endif
+  }
+
+  // print the content of the underlying Masstree
+  void print_table() const {
+    table_.print();
   }
 
   template <typename ValType>
@@ -347,6 +359,11 @@ public:
       Version v;
       atomicRead(e, v, val);
       item.observe(tversion_type(v));
+
+      // skip nodes that are marked invalid
+      if (v & invalid_bit)
+        return true;
+
       // key and val are both only guaranteed until callback returns
       return callback(key, val);//query_callback_overload(key, val, callback);
     };
@@ -381,6 +398,10 @@ public:
       Version v;
       atomicRead(e, v, val);
       item.observe(tversion_type(v));
+
+      if (v & invalid_bit)
+        return true;
+
       return callback(key, val);
     };
 
