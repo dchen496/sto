@@ -295,7 +295,9 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
         size += it->owner()->log_entry_size(*it);
     }
 
-    // reserve space in buffer
+    // Reserve space in buffer, and flush it if it's full.
+    // The log batch is flushed BEFORE updating max_logged_tid since
+    // it doesn't contain the new txn.
     if (thr.log_buf_used + size > STO_LOG_BUF_SIZE)
         flush_log_batch();
 

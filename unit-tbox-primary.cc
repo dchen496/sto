@@ -33,13 +33,12 @@ void test_simple_int(int batch) {
         if (!batch)
             Transaction::flush_log_batch();
     }
-    if (batch)
-        Transaction::flush_log_batch();
+    Transaction::flush_log_batch();
 
-    printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
     Transaction::stop_logging();
     Transaction::clear_registered_objects();
-    std::flush(std::cout);
+    printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
+    fflush(stdout);
 }
 
 void test_many_writes(int batch) {
@@ -76,10 +75,10 @@ void test_many_writes(int batch) {
     }
     Transaction::flush_log_batch();
 
-    printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
     Transaction::stop_logging();
     Transaction::clear_registered_objects();
-    std::flush(std::cout);
+    printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
+    fflush(stdout);
 }
 
 struct ThreadArgs {
@@ -142,10 +141,38 @@ void test_multithreaded(int batch) {
     }
     Transaction::flush_log_batch();
 
-    printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
     Transaction::stop_logging();
     Transaction::clear_registered_objects();
-    std::flush(std::cout);
+    printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
+    fflush(stdout);
+}
+
+void test_simple_string() {
+    usleep(startup_delay);
+    TBox<std::string> f;
+    Transaction::register_object(f, 0);
+    assert(Transaction::init_logging(1, {host}, port) == 0);
+
+    for (int i = 0; i < 20; i++) {
+        std::stringstream ss;
+        ss << i;
+        {
+            TransactionGuard t;
+            f = ss.str();
+        }
+
+        {
+            TransactionGuard t2;
+            std::string f_read = f;
+            assert(f_read == ss.str());
+        }
+        Transaction::flush_log_batch();
+    }
+    Transaction::flush_log_batch();
+    Transaction::stop_logging();
+    Transaction::clear_registered_objects();
+    printf("PRIMARY PASS: %s()\n", __FUNCTION__);
+    fflush(stdout);
 }
 
 int main() {
@@ -157,5 +184,6 @@ int main() {
     test_many_writes(1);
     test_multithreaded(0);
     test_multithreaded(1);
+    test_simple_string();
     return 0;
 }

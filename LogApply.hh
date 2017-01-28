@@ -13,6 +13,8 @@ public:
 
 private:
   static void *applier(void *argsptr);
+  static bool read_batch(char *buf, char *&start, char *&end, bool &needs_free);
+  static char *process_batch_part(char *start, char *end, uint64_t max_tid);
   static char *process_txn(char *ptr);
   static int advance();
   static void *advancer(void *argsptr);
@@ -25,6 +27,6 @@ private:
   static ThreadArgs thread_args[MAX_THREADS];
 
   static bool run;
-  static Transaction::tid_type valid_tids[MAX_THREADS];
-  static Transaction::tid_type min_valid_tid;
+  static Transaction::tid_type recvd_tids[MAX_THREADS];
+  static Transaction::tid_type min_recvd_tid;
 };

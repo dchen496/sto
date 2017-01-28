@@ -17,8 +17,8 @@ void test_simple_int(int batch) {
     assert(f.nontrans_read() == batch ? 69 : 19);
 
     Transaction::clear_registered_objects();
-    std::cout << "BACKUP PASS: " << __FUNCTION__ << "(" << batch << ")\n";
-    std::flush(std::cout);
+    printf("BACKUP PASS: %s(%d)\n", __FUNCTION__, batch);
+    fflush(stdout);
 }
 
 void test_many_writes(int batch) {
@@ -35,8 +35,8 @@ void test_many_writes(int batch) {
         assert(fs[i].nontrans_read() == refs[i].nontrans_read());
 
     Transaction::clear_registered_objects();
-    std::cout << "BACKUP PASS: " << __FUNCTION__ << "(" << batch << ")\n";
-    std::flush(std::cout);
+    printf("BACKUP PASS: %s(%d)\n", __FUNCTION__, batch);
+    fflush(stdout);
 }
 
 void test_multithreaded(int batch) {
@@ -54,8 +54,20 @@ void test_multithreaded(int batch) {
         assert(fs[i].nontrans_read() == refs[i].nontrans_read());
 
     Transaction::clear_registered_objects();
-    std::cout << "BACKUP PASS: " << __FUNCTION__ << "(" << batch << ")\n";
-    std::flush(std::cout);
+    printf("BACKUP PASS: %s(%d)\n", __FUNCTION__, batch);
+    fflush(stdout);
+}
+
+void test_simple_string() {
+    TBox<std::string> f;
+    Transaction::register_object(f, 0);
+    assert(LogApply::listen(1, port) == 0);
+
+    assert(f.nontrans_read() == "19");
+
+    Transaction::clear_registered_objects();
+    printf("BACKUP PASS: %s()\n", __FUNCTION__);
+    fflush(stdout);
 }
 
 int main() {
@@ -66,5 +78,6 @@ int main() {
     test_many_writes(1);
     test_multithreaded(0);
     test_multithreaded(1);
+    test_simple_string();
     return 0;
 }

@@ -13,8 +13,8 @@ pthread_t LogApply::advance_thread;
 LogApply::ThreadArgs LogApply::thread_args[MAX_THREADS];
 
 bool LogApply::run;
-Transaction::tid_type LogApply::valid_tids[MAX_THREADS];
-Transaction::tid_type LogApply::min_valid_tid = 0; // 0 is lower than any valid TID
+Transaction::tid_type LogApply::recvd_tids[MAX_THREADS];
+Transaction::tid_type LogApply::min_recvd_tid = 0; // 0 is lower than any valid TID
 
 int LogApply::listen(unsigned nthreads, int start_port) {
     run = true;
@@ -79,12 +79,57 @@ void LogApply::stop() {
 /*
     Log batch format:
     - Length of batch (8 bytes)
-    - Valid TID (8 bytes)
+    - Batch TID (8 bytes)
+        - If this batch and all previous batches are applied, the database
+          state will reflect at least this TID
     - For each transaction:
         - Transaction ID (8 bytes)
         - Number of entries/writes (8 bytes)
         - List of entries (type specific format)
 */
+bool LogApply::read_batch(char *buf, char *&start, char *&end, bool &needs_free) {
+    int id = TThread::id();
+
+    start = nullptr;
+    end = nullptr;
+    needs_free = false;
+
+    char *ptr = buf;
+    int n = NetUtils::read_all(sock_fds[id], ptr, STO_LOG_BATCH_HEADER_SIZE);
+    if (n <= 0)
+        return false;
+
+    uint64_t len = NetUtils::scan<uint64_t>(ptr);
+    assert(len < STO_LOG_BUF_SIZE);
+    uint64_t recvd_tid = NetUtils::scan<uint64_t>(ptr);
+    assert(recvd_tids[id] <= recvd_tid);
+
+    if (len > STO_LOG_BATCH_HEADER_SIZE) {
+        n = NetUtils::read_all(sock_fds[id], ptr, len - STO_LOG_BATCH_HEADER_SIZE);
+        if (n <= 0)
+            return false;
+    }
+
+    // record max received TID for this worker
+    fence();
+    recvd_tids[id] = recvd_tid;
+    fence();
+
+    start = buf + STO_LOG_BATCH_HEADER_SIZE;
+    end = buf + len;
+    return true;
+}
+
+char *LogApply::process_batch_part(char *start, char *end, uint64_t max_tid) {
+    while (start < end) {
+        uint64_t tid = ((uint64_t *) start)[0];
+        if (tid > max_tid)
+            break;
+        start = process_txn(start);
+    }
+    return start;
+}
+
 void *LogApply::applier(void *argsptr) {
     int id = ((ThreadArgs *) argsptr)->thread_id;
     TThread::set_id(id);
@@ -100,29 +145,14 @@ void *LogApply::applier(void *argsptr) {
 
     // terminates when the primary disconnects
     while (true) {
-        // read batch
-        uint64_t *hdr = (uint64_t *) buf.data();
-        int n = NetUtils::read_all(sock_fds[id], (void *) &hdr[0], sizeof(uint64_t));
-        if (n <= 0)
-            break;
-        uint64_t batch_len = hdr[0];
-        assert(batch_len < STO_LOG_BUF_SIZE);
-
-        n = NetUtils::read_all(sock_fds[id], (void *) &hdr[1], batch_len - sizeof(uint64_t));
-        if (n <= 0)
+        if (!run)
             break;
 
-        // record max valid TID for this worker
-        uint64_t valid_tid = hdr[1];
-        assert(valid_tids[id] <= valid_tid);
-        valid_tids[id] = valid_tid;
-        fence();
-
-        // apply batch
-        char *txn = (char *) &hdr[2];
-        char *end = batch_len + (char *) &hdr[0];
-        while (txn < end)
-            txn = process_txn(txn);
+        char *start, *end;
+        bool needs_free;
+        if (!read_batch(buf.data(), start, end, needs_free))
+            break;
+        process_batch_part(start, end, ~0ULL);
     }
     return nullptr;
 }
@@ -160,14 +190,14 @@ char *LogApply::process_txn(char *ptr) {
 
 int LogApply::advance() {
     fence();
-    Transaction::tid_type new_valid = valid_tids[0];
+    Transaction::tid_type new_valid = recvd_tids[0];
     for (int i = 1; i < nthreads; i++)
-        new_valid = std::min(new_valid, valid_tids[i]);
-    min_valid_tid = new_valid;
+        new_valid = std::min(new_valid, recvd_tids[i]);
+    min_recvd_tid = new_valid;
 
     for (int i = 0; i < nthreads; i++) {
         int len = sizeof(uint64_t);
-        if (write(sock_fds[i], &min_valid_tid, len) < len) {
+        if (write(sock_fds[i], &min_recvd_tid, len) < len) {
             perror("short write");
             return -1;
         }

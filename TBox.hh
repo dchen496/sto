@@ -1,6 +1,7 @@
 #pragma once
 #include "Interface.hh"
 #include "TWrapped.hh"
+#include "Serializer.hh"
 
 template <typename T, typename W = TWrapped<T> >
 class TBox : public TObject {
@@ -75,7 +76,9 @@ public:
         return item.check_version(vers_);
     }
     void install(TransItem& item, Transaction& txn) override {
-        v_.write(std::move(item.template write_value<T>()));
+        // XXX: logging means we can't mutate the TItem
+        // v_.write(std::move(item.template write_value<T>()));
+        v_.write(item.template write_value<T>());
         txn.set_version_unlock(vers_, item);
     }
     void unlock(TransItem&) override {
@@ -91,20 +94,18 @@ public:
     }
 
     int log_entry_size(TransItem &item) {
-        (void) item;
-        return sizeof(T);
+        return Serializer<T>::size(std::move(item.template write_value<T>()));
     }
     int write_log_entry(TransItem &item, char *buf) {
-        (void) item, (void) buf;
-        *(T *) buf = item.template write_value<T>();
-        return sizeof(T);
+        return Serializer<T>::serialize(buf, std::move(item.template write_value<T>()));
     }
     bool apply_log_entry(char *entry, TransactionTid::type log_tid, int &bytes_read) {
-        bytes_read = sizeof(T);
+        T v;
+        bytes_read = Serializer<T>::deserialize(entry, v);
         if (!vers_.lock_if_older(version_type(log_tid))) {
             return false;
         }
-        v_.write(std::move(*(T *) entry));
+        v_.write(std::move(v));
         vers_.set_version_unlock(log_tid);
         return true;
     }
