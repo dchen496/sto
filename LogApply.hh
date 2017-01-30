@@ -5,19 +5,29 @@ class LogApply {
     int thread_id;
   };
 
+  struct LogBatch {
+    uint64_t max_tid;
+    bool needs_free;
+    char *buf;
+    char *start;
+    char *end;
+  };
+
 public:
   static int listen(unsigned nthreads, int start_port);
   static void stop();
+  static void cleanup(std::function<void()> callback);
 
   static bool debug_txn_log;
 
 private:
   static void *applier(void *argsptr);
-  static bool read_batch(char *buf, char *&start, char *&end, bool &needs_free);
-  static char *process_batch_part(char *start, char *end, uint64_t max_tid);
+  static bool read_batch(std::vector<char *> &buffer_pool, LogBatch &batch);
+  static char *process_batch_part(LogBatch &batch, uint64_t max_tid);
   static char *process_txn(char *ptr);
   static int advance();
   static void *advancer(void *argsptr);
+  static void run_cleanup();
 
   static int nthreads;
   static int listen_fds[MAX_THREADS];
@@ -29,4 +39,6 @@ private:
   static bool run;
   static Transaction::tid_type recvd_tids[MAX_THREADS];
   static Transaction::tid_type min_recvd_tid;
+
+  static std::vector<std::function<void()>> cleanup_callbacks[MAX_THREADS];
 };

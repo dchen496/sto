@@ -2,6 +2,7 @@
 #include "LogApply.hh"
 #include "NetUtils.hh"
 #include <vector>
+#include <deque>
 
 bool LogApply::debug_txn_log = STO_DEBUG_TXN_LOG;
 
@@ -15,6 +16,8 @@ LogApply::ThreadArgs LogApply::thread_args[MAX_THREADS];
 bool LogApply::run;
 Transaction::tid_type LogApply::recvd_tids[MAX_THREADS];
 Transaction::tid_type LogApply::min_recvd_tid = 0; // 0 is lower than any valid TID
+
+std::vector<std::function<void()>> LogApply::cleanup_callbacks[MAX_THREADS];
 
 int LogApply::listen(unsigned nthreads, int start_port) {
     run = true;
@@ -87,14 +90,20 @@ void LogApply::stop() {
         - Number of entries/writes (8 bytes)
         - List of entries (type specific format)
 */
-bool LogApply::read_batch(char *buf, char *&start, char *&end, bool &needs_free) {
+bool LogApply::read_batch(std::vector<char *> &buffer_pool, LogBatch &batch) {
     int id = TThread::id();
 
-    start = nullptr;
-    end = nullptr;
-    needs_free = false;
+    if (buffer_pool.empty()) {
+        batch.buf = new char[STO_LOG_BUF_SIZE];
+    } else {
+        batch.buf = *buffer_pool.rbegin();
+        buffer_pool.pop_back();
+    }
+    batch.start = nullptr;
+    batch.end = nullptr;
+    batch.needs_free = false;
 
-    char *ptr = buf;
+    char *ptr = batch.buf;
     int n = NetUtils::read_all(sock_fds[id], ptr, STO_LOG_BATCH_HEADER_SIZE);
     if (n <= 0)
         return false;
@@ -113,29 +122,27 @@ bool LogApply::read_batch(char *buf, char *&start, char *&end, bool &needs_free)
     // record max received TID for this worker
     fence();
     recvd_tids[id] = recvd_tid;
+    batch.max_tid = recvd_tid;
     fence();
 
-    start = buf + STO_LOG_BATCH_HEADER_SIZE;
-    end = buf + len;
+    batch.start = batch.buf + STO_LOG_BATCH_HEADER_SIZE;
+    batch.end = batch.buf + len;
     return true;
 }
 
-char *LogApply::process_batch_part(char *start, char *end, uint64_t max_tid) {
-    while (start < end) {
-        uint64_t tid = ((uint64_t *) start)[0];
+char *LogApply::process_batch_part(LogBatch &batch, uint64_t max_tid) {
+    while (batch.start < batch.end) {
+        uint64_t tid = ((uint64_t *) batch.start)[0];
         if (tid > max_tid)
             break;
-        start = process_txn(start);
+        batch.start = process_txn(batch.start);
     }
-    return start;
+    return batch.start;
 }
 
 void *LogApply::applier(void *argsptr) {
     int id = ((ThreadArgs *) argsptr)->thread_id;
     TThread::set_id(id);
-
-    std::vector<char> buf;
-    buf.resize(STO_LOG_BUF_SIZE);
 
     sock_fds[id] = accept(listen_fds[id], NULL, NULL);
     if (sock_fds[id] < 0) {
@@ -143,17 +150,38 @@ void *LogApply::applier(void *argsptr) {
         return nullptr;
     }
 
+    std::vector<char *> buffer_pool;
+    std::deque<LogBatch> batches;
+
     // terminates when the primary disconnects
-    while (true) {
+    bool connected = true;
+    while (connected) {
         if (!run)
             break;
 
-        char *start, *end;
-        bool needs_free;
-        if (!read_batch(buf.data(), start, end, needs_free))
-            break;
-        process_batch_part(start, end, ~0ULL);
+        LogBatch new_batch;
+        if (!read_batch(buffer_pool, new_batch))
+            connected = false;
+        else
+            batches.push_back(new_batch);
+
+        while (!batches.empty()) {
+            LogBatch &batch = batches.front();
+            uint64_t max_tid = min_recvd_tid;
+            if (!connected)
+                max_tid = ~0ULL;
+
+            if (batch.max_tid > max_tid)
+                break;
+            batch.start = process_batch_part(batch, max_tid);
+            if (batch.start < batch.end)
+                break;
+            buffer_pool.push_back(batch.buf);
+            batches.pop_front();
+        }
     }
+    for (char *buf : buffer_pool)
+        delete[] buf;
     return nullptr;
 }
 
@@ -229,4 +257,15 @@ void *LogApply::advancer(void *) {
         fence();
     }
     return nullptr;
+}
+
+void LogApply::run_cleanup() {
+    int id = TThread::id();
+    for (std::function<void()> callback : cleanup_callbacks[id])
+        callback();
+    cleanup_callbacks[id].clear();
+}
+
+void LogApply::cleanup(std::function<void()> callback) {
+    cleanup_callbacks[TThread::id()].push_back(callback);
 }

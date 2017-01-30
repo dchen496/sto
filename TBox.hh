@@ -102,9 +102,8 @@ public:
     bool apply_log_entry(char *entry, TransactionTid::type log_tid, int &bytes_read) {
         T v;
         bytes_read = Serializer<T>::deserialize(entry, v);
-        if (!vers_.lock_if_older(version_type(log_tid))) {
+        if (!vers_.lock_if_older(version_type(log_tid)))
             return false;
-        }
         v_.write(std::move(v));
         vers_.set_version_unlock(log_tid);
         return true;

@@ -38,6 +38,8 @@
 /unit-tbox
 /unit-tbox-primary
 /unit-tbox-backup
+/unit-hashtable-primary
+/unit-hashtable-backup
 /unit-tgeneric
 /unit-tintpredicate
 /unit-tcounter

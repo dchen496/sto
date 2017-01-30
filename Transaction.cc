@@ -230,6 +230,11 @@ void Transaction::stop(bool committed, unsigned* writeset, unsigned nwriteset) {
             if (it->needs_unlock())
                 it->owner()->unlock(*it);
         }
+
+        // log this transaction's writeset to the current thread's log buffer
+        if (any_writes_ && committed && log_enable)
+           append_log_entry(writeset, nwriteset);
+
         for (unsigned* idxit = writeset + nwriteset; idxit != writeset; ) {
             --idxit;
             if (*idxit < tset_initial_capacity)
@@ -255,10 +260,6 @@ void Transaction::stop(bool committed, unsigned* writeset, unsigned nwriteset) {
                 it->owner()->cleanup(*it, committed);
         }
     }
-
-    // log this transaction's writeset to the current thread's log buffer
-    if (any_writes_ && committed && log_enable)
-        append_log_entry(writeset, nwriteset);
 
 after_unlock:
     threadinfo_t& thr = tinfo[TThread::id()];

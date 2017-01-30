@@ -8,6 +8,7 @@
 #include "TWrapped.hh"
 #include "simple_str.hh"
 #include "print_value.hh"
+#include "Serializer.hh"
 
 #define HASHTABLE_DELETE 1
 
@@ -57,7 +58,7 @@ private:
 
   struct bucket_entry {
     // nate: we could inline the first element of a bucket. Would probably
-    // make resize harder though.
+    // make r esize harder though.
     internal_elem *head;
     // this is the bucket version number, which is incremented on insert
     // we use it to make sure that an unsuccessful key lookup will still be
@@ -105,12 +106,15 @@ public:
     Version_type buck_version = buck.version;
     fence();
     internal_elem *e = find(buck, k);
+    std::cout << "wtf" << std::endl;
     if (e) {
       auto item = t_read_only_item(e);
+      std::cout << "wtf2" << std::endl;
       if (!validity_check(item, e)) {
         Sto::abort();
         return false;
       }
+      std::cout << "wtf3" << std::endl;
 #if READ_MY_WRITES
       // deleted
       if (has_delete(item)) {
@@ -365,6 +369,78 @@ public:
       assert(!el->valid());
       _remove(el);
     }
+  }
+
+  int log_entry_size(TransItem &item) {
+    int size = 0;
+    // flags
+    size += 1;
+    // key
+    size += Serializer<key_type>::size(item.key<internal_elem*>()->key);
+    // value (insert/update)
+    if (!(item.flags() & delete_bit))
+      size += Serializer<write_value_type>::size(item.template write_value<write_value_type>());
+    return size;
+  }
+
+  int write_log_entry(TransItem &item, char *buf) {
+    char *start = buf;
+    // flags
+    buf += Serializer<uint8_t>::serialize(buf, item.flags() >> TransItem::userf_shift);
+    // key
+    buf += Serializer<key_type>::serialize(buf, item.key<internal_elem*>()->key);
+    // value (insert/update)
+    if (!(item.flags() & delete_bit))
+      buf += Serializer<write_value_type>::serialize(buf, item.template write_value<write_value_type>());
+    return buf - start;
+  }
+
+  bool apply_log_entry(char *entry, TransactionTid::type log_tid, int &bytes_read) {
+    (void) log_tid;
+    char *start = entry;
+    uint8_t sflags;
+    entry += Serializer<uint8_t>::deserialize(entry, sflags);
+    TransItem::flags_type flags = sflags;
+    flags <<= TransItem::userf_shift;
+
+    key_type key;
+    entry += Serializer<key_type>::deserialize(entry, key);
+    bucket_entry& buck = buck_entry(key);
+
+    write_value_type value;
+    if (!(flags & delete_bit))
+      entry += Serializer<write_value_type>::deserialize(entry, value);
+
+    bytes_read = entry - start;
+
+    internal_elem *el = find(buck, key);
+    if (el == nullptr) {
+      lock(buck.version);
+      el = find(buck, key);
+      if (el == nullptr) {
+        el = new internal_elem(key, write_value_type(), true);
+        el->next = buck.head;
+        buck.head = el;
+      }
+      unlock(buck.version);
+    }
+
+    if (flags & delete_bit) {
+      // delete
+      bytes_read = entry - start;
+      if (!el->version.lock_if_older(Version_type(log_tid)))
+        return false;
+      el->version.set_version_unlock(log_tid | invalid_bit);
+      // XXX: we need a cleanup mechanism
+      return true;
+    }
+
+    // update or insert
+    if (!el->version.lock_if_older(Version_type(log_tid)))
+      return false;
+    el->value.write(std::move(value));
+    el->version.set_version_unlock(log_tid);
+    return true;
   }
 
   // these are wrappers for concurrent.cc and other
