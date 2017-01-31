@@ -178,6 +178,7 @@ void *LogApply::applier(void *argsptr) {
             }
         }
 
+        // critical section
         while (!batches.empty()) {
             LogBatch &batch = batches.front();
             uint64_t max_tid = min_received_tid;
@@ -192,6 +193,10 @@ void *LogApply::applier(void *argsptr) {
                 batches.pop_front();
             }
         }
+        // end critical section
+
+        run_cleanup();
+
         if (batches.empty() && !connected)
             break;
     }
@@ -282,9 +287,12 @@ void *LogApply::advancer(void *) {
 
 void LogApply::run_cleanup() {
     int id = TThread::id();
-    for (std::function<void()> callback : cleanup_callbacks[id])
-        callback();
-    cleanup_callbacks[id].clear();
+    while (cleanup_callbacks[id].size() > 0) {
+        std::vector<std::function<void()>> callbacks = cleanup_callbacks[id];
+        cleanup_callbacks[id].clear();
+        for (std::function<void()> callback : callbacks)
+            callback();
+    }
 }
 
 void LogApply::cleanup(std::function<void()> callback) {
