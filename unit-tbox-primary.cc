@@ -86,6 +86,7 @@ struct ThreadArgs {
     bool batch;
     TBox<int> *fs;
     int n;
+    int ntxns;
 };
 
 void *test_multithreadedWorker(void *argptr) {
@@ -101,8 +102,10 @@ void *test_multithreadedWorker(void *argptr) {
         try {
             Sto::start_transaction();
             fs[a] = (23 * fs[b] + fs[c] + 197) % 997;
-            if (Sto::try_commit() && !args.batch)
+            Sto::commit();
+            if (!args.batch)
                 Transaction::flush_log_batch();
+            args.ntxns++;
         } catch (Transaction::Abort e) {
         }
     }
@@ -116,18 +119,21 @@ void test_multithreaded(int batch) {
     const int nthread = 4;
     TBox<int> fs[n];
     TBox<int> refs[n];
+    TBox<int> ntxns[nthread];
     for (int i = 0; i < n; i++) {
         Transaction::register_object(fs[i], i);
         Transaction::register_object(refs[i], i + n);
         fs[i].nontrans_write(i);
         refs[i].nontrans_write(0);
     }
+    for (int i = 0; i < nthread; i++)
+        Transaction::register_object(ntxns[i], i + 2 * n);
 
     assert(Transaction::init_logging(nthread, {host}, port) == 0);
     pthread_t thrs[nthread];
     ThreadArgs args[nthread];
     for (int i = 0; i < nthread; i++) {
-        args[i] = { .id = i, .batch = batch, .fs = fs, .n = n };
+        args[i] = { .id = i, .batch = batch, .fs = fs, .n = n, .ntxns = 0 };
         pthread_create(&thrs[i], nullptr, test_multithreadedWorker, (void *) &args[i]);
     }
     for (int i = 0; i < nthread; i++)
@@ -138,6 +144,9 @@ void test_multithreaded(int batch) {
         for (int i = 0; i < n; i++) {
             refs[i] = fs[i];
         }
+        ntxns[0] = args[0].ntxns + 1;
+        for (int i = 1; i < nthread; i++)
+            ntxns[i] = args[i].ntxns;
     }
     Transaction::flush_log_batch();
 

@@ -6,6 +6,7 @@
 #include <deque>
 
 bool LogApply::debug_txn_log = STO_DEBUG_TXN_LOG;
+uint64_t LogApply::txns_processed[MAX_THREADS];
 
 int LogApply::nthreads;
 int LogApply::listen_fds[MAX_THREADS];
@@ -31,6 +32,7 @@ int LogApply::listen(unsigned nthreads, int start_port) {
         sock_fds[i] = -1; // ensure that advance_thread waits for all sockets
         received_tids[i] = 0;
         processed_tids[i] = 0;
+        txns_processed[i] = 0;
 
         listen_fds[i] = socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fds[i] < 0) {
@@ -207,6 +209,8 @@ void *LogApply::applier(void *argsptr) {
 
 char *LogApply::process_txn(char *ptr) {
     int id = TThread::id();
+    txns_processed[id]++;
+
     Transaction::tid_type tid;
     ptr += Serializer<Transaction::tid_type>::deserialize(ptr, tid);
     assert(tid > processed_tids[id]);
