@@ -74,9 +74,9 @@ int main() {
     LogApply::debug_txn_log = false;
     test_simple_int(0);
     test_simple_int(1);
-    test_many_writes(0);
+    //test_many_writes(0);
     test_many_writes(1);
-    test_multithreaded(0);
+    //test_multithreaded(0);
     test_multithreaded(1);
     test_simple_string();
     return 0;

@@ -37,8 +37,10 @@ private:
   static ThreadArgs thread_args[MAX_THREADS];
 
   static bool run;
-  static Transaction::tid_type recvd_tids[MAX_THREADS];
-  static Transaction::tid_type min_recvd_tid;
+  static Transaction::tid_type received_tids[MAX_THREADS];
+  static Transaction::tid_type min_received_tid;
+
+  static Transaction::tid_type processed_tids[MAX_THREADS];
 
   static std::vector<std::function<void()>> cleanup_callbacks[MAX_THREADS];
 };

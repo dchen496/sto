@@ -1,6 +1,7 @@
 #include "Transaction.hh"
 #include "LogApply.hh"
 #include "NetUtils.hh"
+#include "Serializer.hh"
 #include <vector>
 #include <deque>
 
@@ -14,18 +15,22 @@ pthread_t LogApply::advance_thread;
 LogApply::ThreadArgs LogApply::thread_args[MAX_THREADS];
 
 bool LogApply::run;
-Transaction::tid_type LogApply::recvd_tids[MAX_THREADS];
-Transaction::tid_type LogApply::min_recvd_tid = 0; // 0 is lower than any valid TID
+Transaction::tid_type LogApply::received_tids[MAX_THREADS];
+Transaction::tid_type LogApply::min_received_tid = 0; // 0 is lower than any valid TID
+Transaction::tid_type LogApply::processed_tids[MAX_THREADS];
 
 std::vector<std::function<void()>> LogApply::cleanup_callbacks[MAX_THREADS];
 
 int LogApply::listen(unsigned nthreads, int start_port) {
     run = true;
+    min_received_tid = 0;
     fence();
 
     LogApply::nthreads = nthreads;
     for (unsigned i = 0; i < nthreads; i++) {
         sock_fds[i] = -1; // ensure that advance_thread waits for all sockets
+        received_tids[i] = 0;
+        processed_tids[i] = 0;
 
         listen_fds[i] = socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fds[i] < 0) {
@@ -108,10 +113,12 @@ bool LogApply::read_batch(std::vector<char *> &buffer_pool, LogBatch &batch) {
     if (n <= 0)
         return false;
 
-    uint64_t len = NetUtils::scan<uint64_t>(ptr);
+    uint64_t len;
+    ptr += Serializer<uint64_t>::deserialize(ptr, len);
     assert(len < STO_LOG_BUF_SIZE);
-    uint64_t recvd_tid = NetUtils::scan<uint64_t>(ptr);
-    assert(recvd_tids[id] <= recvd_tid);
+    uint64_t received_tid;
+    ptr += Serializer<uint64_t>::deserialize(ptr, received_tid);
+    assert(received_tids[id] <= received_tid);
 
     if (len > STO_LOG_BATCH_HEADER_SIZE) {
         n = NetUtils::read_all(sock_fds[id], ptr, len - STO_LOG_BATCH_HEADER_SIZE);
@@ -121,8 +128,8 @@ bool LogApply::read_batch(std::vector<char *> &buffer_pool, LogBatch &batch) {
 
     // record max received TID for this worker
     fence();
-    recvd_tids[id] = recvd_tid;
-    batch.max_tid = recvd_tid;
+    received_tids[id] = received_tid;
+    batch.max_tid = received_tid;
     fence();
 
     batch.start = batch.buf + STO_LOG_BATCH_HEADER_SIZE;
@@ -152,33 +159,41 @@ void *LogApply::applier(void *argsptr) {
 
     std::vector<char *> buffer_pool;
     std::deque<LogBatch> batches;
+    bool connected = true;
 
     // terminates when the primary disconnects
-    bool connected = true;
-    while (connected) {
+    while (true) {
         if (!run)
             break;
 
         LogBatch new_batch;
-        if (!read_batch(buffer_pool, new_batch))
-            connected = false;
-        else
-            batches.push_back(new_batch);
+        if (connected) {
+            if (!read_batch(buffer_pool, new_batch)) {
+                connected = false;
+                fence();
+                received_tids[id] = ~0ULL;
+                fence();
+            } else {
+                batches.push_back(new_batch);
+            }
+        }
 
         while (!batches.empty()) {
             LogBatch &batch = batches.front();
-            uint64_t max_tid = min_recvd_tid;
-            if (!connected)
-                max_tid = ~0ULL;
+            uint64_t max_tid = min_received_tid;
+            acquire_fence();
 
             if (batch.max_tid > max_tid)
                 break;
+
             batch.start = process_batch_part(batch, max_tid);
-            if (batch.start < batch.end)
-                break;
-            buffer_pool.push_back(batch.buf);
-            batches.pop_front();
+            if (batch.start >= batch.end) {
+                buffer_pool.push_back(batch.buf);
+                batches.pop_front();
+            }
         }
+        if (batches.empty() && !connected)
+            break;
     }
     for (char *buf : buffer_pool)
         delete[] buf;
@@ -186,8 +201,14 @@ void *LogApply::applier(void *argsptr) {
 }
 
 char *LogApply::process_txn(char *ptr) {
-    Transaction::tid_type tid = NetUtils::scan<Transaction::tid_type>(ptr);
-    uint64_t nentries = NetUtils::scan<uint64_t>(ptr);
+    int id = TThread::id();
+    Transaction::tid_type tid;
+    ptr += Serializer<Transaction::tid_type>::deserialize(ptr, tid);
+    assert(tid > processed_tids[id]);
+    processed_tids[id] = tid;
+
+    uint64_t nentries;
+    ptr += Serializer<uint64_t>::deserialize(ptr, nentries);
 
     if (debug_txn_log) {
         std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << tid << ' ';
@@ -195,7 +216,8 @@ char *LogApply::process_txn(char *ptr) {
     }
 
     for (uint64_t i = 0; i < nentries; i++) {
-        uint64_t object_id = NetUtils::scan<uint64_t>(ptr);
+        uint64_t object_id;
+        ptr += Serializer<uint64_t>::deserialize(ptr, object_id);
         TObject &obj = Transaction::get_registered_object(object_id);
 
         int bytes_read = 0;
@@ -218,19 +240,19 @@ char *LogApply::process_txn(char *ptr) {
 
 int LogApply::advance() {
     fence();
-    Transaction::tid_type new_valid = recvd_tids[0];
+    Transaction::tid_type new_valid = received_tids[0];
     for (int i = 1; i < nthreads; i++)
-        new_valid = std::min(new_valid, recvd_tids[i]);
-    min_recvd_tid = new_valid;
+        new_valid = std::min(new_valid, received_tids[i]);
+    min_received_tid = new_valid;
+    release_fence();
 
     for (int i = 0; i < nthreads; i++) {
         int len = sizeof(uint64_t);
-        if (write(sock_fds[i], &min_recvd_tid, len) < len) {
+        if (write(sock_fds[i], &min_received_tid, len) < len) {
             perror("short write");
             return -1;
         }
     }
-    fence();
     return 0;
 }
 
@@ -254,7 +276,6 @@ void *LogApply::advancer(void *) {
         if (advance() < 0)
             return nullptr;
         usleep(50000);
-        fence();
     }
     return nullptr;
 }
