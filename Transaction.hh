@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <sstream>
 #include <unordered_map>
+#include <vector>
 
 #ifndef STO_PROFILE_COUNTERS
 #define STO_PROFILE_COUNTERS 0
