@@ -75,6 +75,9 @@ int Transaction::init_logging(unsigned num_threads, std::vector<std::string> hos
 void Transaction::stop_logging() {
     log_enable = false;
 
+    // XXX could do some smarter synchronization, but really this is for debugging
+    usleep(10000);
+
     // signal to backups that there are no more log entries
     for (int i = 0; i < MAX_THREADS; i++) {
         threadinfo_t &thr = tinfo[i];

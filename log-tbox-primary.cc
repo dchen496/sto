@@ -71,7 +71,10 @@ void test_multithreaded_int() {
         agg.txns += s.txns;
     }
 
-    printf("Stats: bytes=%llu bufs=%llu ents=%llu txns=%llu us=%lld\n", agg.bytes, agg.bufs, agg.ents, agg.txns, us);
+    printf("MB=%.2f bufs=%llu ents=%llu txns=%llu\n", agg.bytes/1.0e6, agg.bufs, agg.ents, agg.txns);
+    double s = us / 1.0e6;
+    printf("s=%f MB/s=%f bufs/s=%f ents/s=%f txns/s=%f\n", s, agg.bytes/s/1.0e6, agg.bufs/s, agg.ents/s, agg.txns/s);
+    printf("b/ent=%f b/txn=%f\n", (double)agg.bytes/agg.ents, (double)agg.bytes/agg.txns);
     fflush(stdout);
 }
 
