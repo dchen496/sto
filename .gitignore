@@ -33,6 +33,8 @@
 /iterators
 /pqVsIt
 /ex-counter
+/log-tbox-primary
+/log-tbox-backup
 /unit-rcu
 /unit-tarray
 /unit-tbox
