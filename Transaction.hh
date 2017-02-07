@@ -181,6 +181,17 @@ struct txp_counters {
 void reportPerf();
 #define STO_SHUTDOWN() reportPerf()
 
+struct log_stats_t {
+    uint64_t bytes;
+    uint64_t bufs;
+    uint64_t ents;
+    uint64_t txns;
+
+    log_stats_t() :
+        bytes(), bufs(), ents(), txns() {
+    }
+};
+
 struct __attribute__((aligned(128))) threadinfo_t {
     using epoch_type = TRcuSet::epoch_type;
     epoch_type epoch;
@@ -190,18 +201,21 @@ struct __attribute__((aligned(128))) threadinfo_t {
     std::function<void(void)> trans_start_callback;
     std::function<void(void)> trans_end_callback;
     txp_counters p_;
+
     char *log_buf;
     int log_buf_used;
     TransactionTid::type max_logged_tid;
     TransactionTid::type max_synced_tid;
     std::vector<int> log_fds;
+    log_stats_t log_stats;
 
     threadinfo_t() :
         epoch(0),
         log_buf(nullptr),
         log_buf_used(0),
         max_logged_tid(0),
-        max_synced_tid(0) {
+        max_synced_tid(0),
+        log_stats() {
     }
 
     ~threadinfo_t() {

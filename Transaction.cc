@@ -49,6 +49,7 @@ int Transaction::init_logging(unsigned num_threads, std::vector<std::string> hos
        threadinfo_t &thr = tinfo[i];
        thr.log_buf = new char[STO_LOG_BUF_SIZE];
        thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
+       thr.log_stats = log_stats_t();
 
        for (unsigned j = 0; j < hosts.size(); j++) {
            int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -282,7 +283,7 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
 
 
     // compute log entry size first
-    uint64_t size = sizeof(tid_type) + 2 * sizeof(uint64_t); // TID, number of entries, object id
+    uint64_t size = sizeof(tid_type) + sizeof(uint64_t); // TID and number of entries
     uint64_t nentries = 0;
     TransItem* it;
     for (unsigned* idxit = writeset; idxit < writeset + nwriteset; idxit++) {
@@ -292,8 +293,9 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
             it = &tset_[*idxit / tset_chunk][*idxit % tset_chunk];
         if (!it->has_write()) // always false unless a user turns it off in install()/check()
             continue;
+
         nentries++;
-        size += it->owner()->log_entry_size(*it);
+        size += sizeof(uint64_t) + it->owner()->log_entry_size(*it);
     }
 
     // Reserve space in buffer, and flush it if it's full.
@@ -328,7 +330,6 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
         *(uint64_t *) ptr = ptr_to_object_id[(void *) it->owner()];
         if(debug_txn_log)
             std::cout << "(" << std::hex << std::setw(2) << *(uint64_t *) ptr << " " << std::dec;
-
         ptr += sizeof(uint64_t);
 
         int nb = it->owner()->write_log_entry(*it, ptr);
@@ -343,10 +344,16 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
     if (debug_txn_log)
         std::cout << '\n';
 
-    thr.log_buf_used = ptr - thr.log_buf;
+
+    int new_used = ptr - thr.log_buf;
+    assert(new_used == thr.log_buf_used + size);
+    thr.log_buf_used = new_used;
 
     // update tid
     update_synced_tid();
+
+    thr.log_stats.txns++;
+    thr.log_stats.ents += nentries;
 }
 
 // See LogApply.cc for the wire format
@@ -358,6 +365,7 @@ void Transaction::flush_log_batch() {
     log_buf[0] = batch_len;
     log_buf[1] = thr.max_logged_tid;
     int len = thr.log_buf_used;
+    assert(len < STO_LOG_BUF_SIZE);
 
     for (unsigned i = 0; i < thr.log_fds.size(); i++) {
         if (write(thr.log_fds[i], thr.log_buf, (int) len) < len)
@@ -367,6 +375,9 @@ void Transaction::flush_log_batch() {
     if (debug_txn_log)
         std::cout << "Thread " << TThread::id() << " flushed " << len << " bytes\n";
     thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
+
+    thr.log_stats.bytes += len;
+    thr.log_stats.bufs++;
 }
 
 void Transaction::update_synced_tid() {

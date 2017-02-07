@@ -1,77 +1,33 @@
 #include <iostream>
 #include <cassert>
 #include <vector>
+#include <chrono>
 #include "Transaction.hh"
 #include "TBox.hh"
 
-#define GUARDED if (TransactionGuard tguard{})
-
-const std::string host = "127.0.0.1";
-const int port = 2000;
-const int niters = 2000000;
 const int startup_delay = 500000;
 
-void test_singlethreaded_int() {
-    usleep(startup_delay);
-    const int n = 100;
-    TBox<int> fs[n];
-    TBox<int> refs[n];
-    for (int i = 0; i < n; i++) {
-        Transaction::register_object(fs[i], i);
-        Transaction::register_object(refs[i], i + n);
-        fs[i].nontrans_write(i);
-        refs[i].nontrans_write(0);
-    }
-    assert(Transaction::init_logging(1, {host}, port) == 0);
-
-    for (int i = 0; i < niters; i++) {
-        int a = (i * 17) % n;
-        int b = (i * 19) % n;
-        int c = (i * 31) % n;
-        {
-            TransactionGuard t;
-            fs[a] = (23 * fs[b] + fs[c] + 197) % 997;
-        }
-    }
-    Transaction::flush_log_batch();
-
-    {
-        TransactionGuard t;
-        for (int i = 0; i < n; i++) {
-            refs[i] = fs[i];
-        }
-    }
-    Transaction::flush_log_batch();
-
-    Transaction::stop_logging();
-    Transaction::clear_registered_objects();
-    printf("PRIMARY PASS: %s()\n", __FUNCTION__);
-    fflush(stdout);
-}
+int nthreads;
+int niters;
+int txnsize;
+std::string backup_host;
+int start_port;
 
 struct ThreadArgs {
     int id;
     TBox<int> *fs;
-    int n;
-    int ntxns;
 };
 
-void *test_multithreaded_worker(void *argptr) {
+void *test_multithreaded_int_worker(void *argptr) {
     ThreadArgs &args = *(ThreadArgs *) argptr;
     TThread::set_id(args.id);
     TBox<int> *fs = args.fs;
-    int n = args.n;
+    int val = 0;
     for (int i = 0; i < niters; i++) {
-        int a = (i * 17) % n;
-        int b = (i * 19) % n;
-        int c = (i * 31) % n;
-
-        try {
-            Sto::start_transaction();
-            fs[a] = (23 * fs[b] + fs[c] + 197) % 997;
-            Sto::commit();
-            args.ntxns++;
-        } catch (Transaction::Abort e) {
+        TransactionGuard t;
+        for (int j = 0; j < txnsize; j++) {
+            fs[j + args.id * txnsize] = val;
+            val++;
         }
     }
     Transaction::flush_log_batch();
@@ -80,51 +36,59 @@ void *test_multithreaded_worker(void *argptr) {
 
 void test_multithreaded_int() {
     usleep(startup_delay);
-    const int n = 20;
-    const int nthread = 4;
-    TBox<int> fs[n];
-    TBox<int> refs[n];
-    TBox<int> ntxns[nthread];
-    for (int i = 0; i < n; i++) {
+    std::vector<TBox<int>> fs(nthreads * txnsize);
+    for (unsigned i = 0; i < fs.size(); i++)
         Transaction::register_object(fs[i], i);
-        Transaction::register_object(refs[i], i + n);
-        fs[i].nontrans_write(i);
-        refs[i].nontrans_write(0);
-    }
-    for (int i = 0; i < nthread; i++)
-        Transaction::register_object(ntxns[i], i + 2 * n);
+    assert(Transaction::init_logging(nthreads, {backup_host}, start_port) == 0);
 
-    assert(Transaction::init_logging(nthread, {host}, port) == 0);
-    pthread_t thrs[nthread];
-    ThreadArgs args[nthread];
-    for (int i = 0; i < nthread; i++) {
-        args[i] = { .id = i, .fs = fs, .n = n, .ntxns = 0 };
-        pthread_create(&thrs[i], nullptr, test_multithreaded_worker, (void *) &args[i]);
+    pthread_t thrs[nthreads];
+    ThreadArgs args[nthreads];
+
+    using hc = std::chrono::high_resolution_clock;
+
+    hc::time_point time_start = hc::now();
+
+    for (int i = 0; i < nthreads; i++) {
+        args[i] = { .id = i, .fs = fs.data() };
+        pthread_create(&thrs[i], nullptr, test_multithreaded_int_worker, (void *) &args[i]);
     }
-    for (int i = 0; i < nthread; i++)
+    for (int i = 0; i < nthreads; i++)
         pthread_join(thrs[i], nullptr);
 
-    {
-        TransactionGuard t;
-        for (int i = 0; i < n; i++) {
-            refs[i] = fs[i];
-        }
-        ntxns[0] = args[0].ntxns + 1;
-        for (int i = 1; i < nthread; i++)
-            ntxns[i] = args[i].ntxns;
-    }
-    Transaction::flush_log_batch();
+    hc::time_point time_end = hc::now();
 
     Transaction::stop_logging();
     Transaction::clear_registered_objects();
     printf("PRIMARY PASS: %s()\n", __FUNCTION__);
+
+    int64_t us = std::chrono::duration_cast<std::chrono::microseconds>(time_end - time_start).count();
+    log_stats_t agg;
+    for (int i = 0; i < nthreads; i++) {
+        log_stats_t &s = Transaction::tinfo[i].log_stats;
+        agg.bytes += s.bytes;
+        agg.bufs += s.bufs;
+        agg.ents += s.ents;
+        agg.txns += s.txns;
+    }
+
+    printf("Stats: bytes=%llu bufs=%llu ents=%llu txns=%llu us=%lld\n", agg.bytes, agg.bufs, agg.ents, agg.txns, us);
     fflush(stdout);
 }
 
-int main() {
+int main(int argc, char **argv) {
+    if (argc != 6) {
+        printf("usage: log-tbox-primary nthreads niters txnsize backup_host start_port");
+        return -1;
+    }
+
+    nthreads = atoi(argv[1]);
+    niters = atoi(argv[2]);
+    txnsize = atoi(argv[3]);
+    backup_host = std::string(argv[4]);
+    start_port = atoi(argv[5]);
+
     TThread::set_id(0);
     Transaction::debug_txn_log = false;
-    test_singlethreaded_int();
     test_multithreaded_int();
     return 0;
 }
