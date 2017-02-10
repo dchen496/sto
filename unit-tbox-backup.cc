@@ -4,7 +4,7 @@
 #include <vector>
 #include "Transaction.hh"
 #include "TBox.hh"
-#include "LogApply.hh"
+#include "LogProto.hh"
 
 const int port = 2000;
 const int niters = 2000000;

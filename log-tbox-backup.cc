@@ -3,7 +3,7 @@
 #include <vector>
 #include "Transaction.hh"
 #include "TBox.hh"
-#include "LogApply.hh"
+#include "LogProto.hh"
 
 int nthreads;
 int niters;

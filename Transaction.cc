@@ -359,7 +359,7 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
     thr.log_stats.ents += nentries;
 }
 
-// See LogApply.cc for the wire format
+// See LogProto.cc for the wire format
 void Transaction::flush_log_batch() {
     threadinfo_t& thr = tinfo[TThread::id()];
 

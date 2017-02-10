@@ -1,5 +1,5 @@
 #include "Transaction.hh"
-#include "LogApply.hh"
+#include "LogProto.hh"
 #include "NetUtils.hh"
 #include "Serializer.hh"
 #include <vector>
