@@ -71,7 +71,7 @@
 #endif
 
 #define STO_LOG_BUF_SIZE (128 * 1024)
-#define STO_LOG_BATCH_HEADER_SIZE (2 * sizeof(uint64_t))
+#define STO_LOG_BATCH_HEADER_SIZE (3 * sizeof(uint64_t))
 #define STO_LOG_MAX_BATCH (STO_LOG_BUF_SIZE - STO_LOG_BATCH_HEADER_SIZE)
 
 #ifndef STO_DEBUG_TXN_LOG

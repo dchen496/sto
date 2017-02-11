@@ -2,38 +2,45 @@
 #include "LogProto.hh"
 #include "NetUtils.hh"
 #include "Serializer.hh"
-#include <vector>
 #include <deque>
 
 bool LogApply::debug_txn_log = STO_DEBUG_TXN_LOG;
 uint64_t LogApply::txns_processed[MAX_THREADS];
 
-int LogApply::nthreads;
+int LogApply::nrecv_threads;
 int LogApply::listen_fds[MAX_THREADS];
 int LogApply::sock_fds[MAX_THREADS];
-pthread_t LogApply::apply_threads[MAX_THREADS];
-pthread_t LogApply::advance_thread;
-LogApply::ThreadArgs LogApply::thread_args[MAX_THREADS];
+pthread_t LogApply::recv_threads[MAX_THREADS];
+LogApply::ThreadArgs LogApply::recv_thread_args[MAX_THREADS];
 
-bool LogApply::run;
+int LogApply::napply_threads;
+pthread_t LogApply::apply_threads[MAX_THREADS];
+LogApply::ThreadArgs LogApply::apply_thread_args[MAX_THREADS];
+
+pthread_t LogApply::advance_thread;
+
+volatile bool LogApply::run;
+
+std::mutex LogApply::apply_mutexes[MAX_THREADS];
+std::queue<LogApply::LogBatch> LogApply::batch_queue[MAX_THREADS];
+std::condition_variable LogApply::batch_queue_wait[MAX_THREADS];
 Transaction::tid_type LogApply::received_tids[MAX_THREADS];
 Transaction::tid_type LogApply::min_received_tid = 0; // 0 is lower than any valid TID
 Transaction::tid_type LogApply::processed_tids[MAX_THREADS];
 
+std::mutex LogApply::recv_mutexes[MAX_THREADS];
+std::queue<LogApply::LogBatch> LogApply::free_queue[MAX_THREADS];
+
 std::vector<std::function<void()>> LogApply::cleanup_callbacks[MAX_THREADS];
 
-int LogApply::listen(unsigned nthreads, int start_port) {
+int LogApply::listen(unsigned nrecv_threads, unsigned napply_threads, int start_port) {
     run = true;
     min_received_tid = 0;
     fence();
 
-    LogApply::nthreads = nthreads;
-    for (unsigned i = 0; i < nthreads; i++) {
+    LogApply::nrecv_threads = nrecv_threads;
+    for (unsigned i = 0; i < nrecv_threads; i++) {
         sock_fds[i] = -1; // ensure that advance_thread waits for all sockets
-        received_tids[i] = 0;
-        processed_tids[i] = 0;
-        txns_processed[i] = 0;
-
         listen_fds[i] = socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fds[i] < 0) {
             perror("couldn't create socket");
@@ -57,13 +64,26 @@ int LogApply::listen(unsigned nthreads, int start_port) {
             return -1;
         }
 
-        thread_args[i].thread_id = i;
-        pthread_create(&apply_threads[i], nullptr, &applier, (void *) &thread_args[i]);
+        recv_thread_args[i].thread_id = i;
+        pthread_create(&recv_threads[i], nullptr, &receiver, (void *) &recv_thread_args[i]);
+    }
+
+    LogApply::napply_threads = napply_threads;
+    for (unsigned i = 0; i < napply_threads; i++) {
+        received_tids[i] = 0;
+        processed_tids[i] = 0;
+        txns_processed[i] = 0;
+
+        apply_thread_args[i].thread_id = i;
+        pthread_create(&apply_threads[i], nullptr, &applier, (void *) &apply_thread_args[i]);
     }
 
     pthread_create(&advance_thread, nullptr, &advancer, nullptr);
 
-    for (unsigned i = 0; i < nthreads; i++)
+    for (unsigned i = 0; i < nrecv_threads; i++)
+        pthread_join(recv_threads[i], nullptr);
+
+    for (unsigned i = 0; i < napply_threads; i++)
         pthread_join(apply_threads[i], nullptr);
 
     run = false;
@@ -73,7 +93,7 @@ int LogApply::listen(unsigned nthreads, int start_port) {
     advance();
 
     // at this point, everyone is done sending
-    for (unsigned i = 0; i < nthreads; i++) {
+    for (unsigned i = 0; i < napply_threads; i++) {
         shutdown(sock_fds[i], SHUT_WR);
         close(sock_fds[i]);
         close(listen_fds[i]);
@@ -86,8 +106,49 @@ void LogApply::stop() {
     run = false;
 }
 
+void *LogApply::receiver(void * argsptr) {
+    int id = ((ThreadArgs *) argsptr)->thread_id;
+
+    sock_fds[id] = accept(listen_fds[id], NULL, NULL);
+    if (sock_fds[id] < 0) {
+        perror("couldn't accept connection");
+        return nullptr;
+    }
+
+    std::vector<char *> buffer_pool;
+
+    // terminates when the primary disconnects
+    while (run) {
+        {
+            std::unique_lock<std::mutex> lk(recv_mutexes[id]);
+            while (!free_queue[id].empty()) {
+                buffer_pool.push_back(free_queue[id].front().buf);
+                free_queue[id].pop();
+            }
+        }
+
+        LogBatch batch;
+        if (!read_batch(sock_fds[id], buffer_pool, batch))
+            break;
+
+        {
+            int thid = batch.thread_id;
+            std::unique_lock<std::mutex> lk(apply_mutexes[thid]);
+            // we require that batches be sent in order to the apply thread
+            // to avoid issues with missing batches
+            assert(received_tids[thid] <= batch.max_tid);
+            received_tids[thid] = batch.max_tid;
+            batch.recv_thr_id = id;
+            batch_queue[thid].push(batch);
+        }
+    }
+
+    return nullptr;
+}
+
 /*
     Log batch format:
+    - Thread ID (8 bytes)
     - Length of batch (8 bytes)
     - Batch TID (8 bytes)
         - If this batch and all previous batches are applied, the database
@@ -97,46 +158,83 @@ void LogApply::stop() {
         - Number of entries/writes (8 bytes)
         - List of entries (type specific format)
 */
-bool LogApply::read_batch(std::vector<char *> &buffer_pool, LogBatch &batch) {
-    int id = TThread::id();
-
+bool LogApply::read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatch &batch) {
     if (buffer_pool.empty()) {
         batch.buf = new char[STO_LOG_BUF_SIZE];
     } else {
         batch.buf = *buffer_pool.rbegin();
         buffer_pool.pop_back();
     }
+
     batch.start = nullptr;
     batch.end = nullptr;
     batch.needs_free = false;
 
     char *ptr = batch.buf;
-    int n = NetUtils::read_all(sock_fds[id], ptr, STO_LOG_BATCH_HEADER_SIZE);
+    int n = NetUtils::read_all(sock_fd, ptr, STO_LOG_BATCH_HEADER_SIZE);
     if (n <= 0)
         return false;
+
+    uint64_t thread_id;
+    ptr += Serializer<uint64_t>::deserialize(ptr, thread_id);
+    assert(thread_id < (uint64_t) napply_threads);
 
     uint64_t len;
     ptr += Serializer<uint64_t>::deserialize(ptr, len);
     assert(len < STO_LOG_BUF_SIZE);
+
     uint64_t received_tid;
     ptr += Serializer<uint64_t>::deserialize(ptr, received_tid);
-    assert(received_tids[id] <= received_tid);
 
     if (len > STO_LOG_BATCH_HEADER_SIZE) {
-        n = NetUtils::read_all(sock_fds[id], ptr, len - STO_LOG_BATCH_HEADER_SIZE);
+        n = NetUtils::read_all(sock_fd, ptr, len - STO_LOG_BATCH_HEADER_SIZE);
         if (n <= 0)
             return false;
     }
 
-    // record max received TID for this worker
-    fence();
-    received_tids[id] = received_tid;
+    batch.thread_id = thread_id;
     batch.max_tid = received_tid;
-    fence();
-
     batch.start = batch.buf + STO_LOG_BATCH_HEADER_SIZE;
     batch.end = batch.buf + len;
     return true;
+}
+
+void *LogApply::applier(void *argsptr) {
+    int id = ((ThreadArgs *) argsptr)->thread_id;
+    TThread::set_id(id);
+
+    std::queue<LogBatch> batches;
+
+    while (run) {
+        if (batches.empty()) {
+            std::unique_lock<std::mutex> lk(apply_mutexes[id]);
+            while (batch_queue[id].empty())
+                batch_queue_wait[id].wait(lk);
+            batches.push(batch_queue[id].front());
+            batch_queue[id].pop();
+        }
+
+        uint64_t max_tid = min_received_tid;
+        acquire_fence();
+
+        LogBatch &batch = batches.front();
+        if (batch.max_tid <= max_tid) {
+            batch.start = process_batch_part(batch, max_tid);
+            if (batch.start >= batch.end) {
+                if (batch.needs_free) {
+                    delete[] batch.buf;
+                } else {
+                    std::unique_lock<std::mutex> lk(recv_mutexes[batch.recv_thr_id]);
+                    free_queue[batch.recv_thr_id].push(batch);
+                }
+                batches.pop();
+            }
+        } else {
+            relax_fence();
+        }
+    }
+
+    return nullptr;
 }
 
 char *LogApply::process_batch_part(LogBatch &batch, uint64_t max_tid) {
@@ -147,64 +245,6 @@ char *LogApply::process_batch_part(LogBatch &batch, uint64_t max_tid) {
         batch.start = process_txn(batch.start);
     }
     return batch.start;
-}
-
-void *LogApply::applier(void *argsptr) {
-    int id = ((ThreadArgs *) argsptr)->thread_id;
-    TThread::set_id(id);
-
-    sock_fds[id] = accept(listen_fds[id], NULL, NULL);
-    if (sock_fds[id] < 0) {
-        perror("couldn't accept connection");
-        return nullptr;
-    }
-
-    std::vector<char *> buffer_pool;
-    std::deque<LogBatch> batches;
-    bool connected = true;
-
-    // terminates when the primary disconnects
-    while (true) {
-        if (!run)
-            break;
-
-        LogBatch new_batch;
-        if (connected) {
-            if (!read_batch(buffer_pool, new_batch)) {
-                connected = false;
-                fence();
-                received_tids[id] = ~0ULL;
-                fence();
-            } else {
-                batches.push_back(new_batch);
-            }
-        }
-
-        // critical section
-        while (!batches.empty()) {
-            LogBatch &batch = batches.front();
-            uint64_t max_tid = min_received_tid;
-            acquire_fence();
-
-            if (batch.max_tid > max_tid)
-                break;
-
-            batch.start = process_batch_part(batch, max_tid);
-            if (batch.start >= batch.end) {
-                buffer_pool.push_back(batch.buf);
-                batches.pop_front();
-            }
-        }
-        // end critical section
-
-        run_cleanup();
-
-        if (batches.empty() && !connected)
-            break;
-    }
-    for (char *buf : buffer_pool)
-        delete[] buf;
-    return nullptr;
 }
 
 char *LogApply::process_txn(char *ptr) {
@@ -250,12 +290,12 @@ char *LogApply::process_txn(char *ptr) {
 int LogApply::advance() {
     fence();
     Transaction::tid_type new_valid = received_tids[0];
-    for (int i = 1; i < nthreads; i++)
+    for (int i = 1; i < napply_threads; i++)
         new_valid = std::min(new_valid, received_tids[i]);
     min_received_tid = new_valid;
     release_fence();
 
-    for (int i = 0; i < nthreads; i++) {
+    for (int i = 0; i < napply_threads; i++) {
         int len = sizeof(uint64_t);
         if (write(sock_fds[i], &min_received_tid, len) < len) {
             perror("short write");
@@ -269,7 +309,7 @@ void *LogApply::advancer(void *) {
     // spin until all sockets are connected
     while (run) {
         bool wait = false;
-        for (int i = 0; i < nthreads; i++) {
+        for (int i = 0; i < napply_threads; i++) {
             if (sock_fds[i] < 0)
                 wait = true;
         }
