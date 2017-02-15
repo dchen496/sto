@@ -1,4 +1,5 @@
 #include "Transaction.hh"
+#include "LogProto.hh"
 #include <typeinfo>
 
 Transaction::testing_type Transaction::testing;
@@ -41,34 +42,23 @@ Transaction::~Transaction() {
             delete[] tset_[i];
 }
 
-int Transaction::init_logging(unsigned num_threads, std::vector<std::string> hosts, int start_port) {
-   assert(num_threads <= MAX_THREADS);
+int Transaction::init_logging(unsigned nsend_threads, unsigned nworker_threads, std::vector<std::string> hosts, int start_port) {
+   assert(nworker_threads <= MAX_THREADS);
+   assert(nsend_threads <= nworker_threads);
+
    log_enable = true;
 
-   for (unsigned i = 0; i < num_threads; i++) {
+   assert(LogSend::create_threads(nsend_threads, nworker_threads, hosts, start_port) == 0);
+
+   for (unsigned i = 0; i < nworker_threads; i++) {
        threadinfo_t &thr = tinfo[i];
        thr.log_buf = new char[STO_LOG_BUF_SIZE];
        thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
        thr.log_stats = log_stats_t();
-
-       for (unsigned j = 0; j < hosts.size(); j++) {
-           int fd = socket(AF_INET, SOCK_STREAM, 0);
-           if (fd < 0) {
-               perror("couldn't create socket");
-               return -1;
-           }
-
-           struct sockaddr_in addr{};
-           addr.sin_family = AF_INET;
-           addr.sin_addr.s_addr = inet_addr(hosts[j].c_str());
-           addr.sin_port = htons(start_port + i);
-           if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-               perror("couldn't connect to backup");
-               return -1;
-           }
-           thr.log_fds.push_back(fd);
-       }
+        // allocate worker threads evenly to send threads
+       thr.log_send_thread = i % nsend_threads;
    }
+
    return 0;
 }
 
@@ -78,24 +68,7 @@ void Transaction::stop_logging() {
     // XXX could do some smarter synchronization, but really this is for debugging
     usleep(10000);
 
-    // signal to backups that there are no more log entries
-    for (int i = 0; i < MAX_THREADS; i++) {
-        threadinfo_t &thr = tinfo[i];
-        for (int fd : thr.log_fds)
-            shutdown(fd, SHUT_WR);
-    }
-
-    // wait for backups to finish sending acks, then close the socket
-    for (int i = 0; i < MAX_THREADS; i++) {
-        threadinfo_t &thr = tinfo[i];
-        for (int fd : thr.log_fds) {
-            Transaction::tid_type tid;
-            while (read(fd, &tid, sizeof(tid)) > 0)
-                ;
-            close(fd);
-        }
-        thr.log_fds.clear();
-    }
+    LogSend::stop();
 }
 
 void Transaction::refresh_tset_chunk() {
@@ -348,7 +321,7 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
         std::cout << '\n';
 
 
-    int new_used = ptr - thr.log_buf;
+    uint64_t new_used = ptr - thr.log_buf;
     assert(new_used == thr.log_buf_used + size);
     thr.log_buf_used = new_used;
 
@@ -363,23 +336,21 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
 void Transaction::flush_log_batch() {
     threadinfo_t& thr = tinfo[TThread::id()];
 
-    int batch_len = thr.log_buf_used;
-    uint64_t *log_buf = (uint64_t *) thr.log_buf;
-    log_buf[0] = batch_len;
-    log_buf[1] = thr.max_logged_tid;
-    int len = thr.log_buf_used;
-    assert(len < STO_LOG_BUF_SIZE);
+    assert(thr.log_buf_used < STO_LOG_BUF_SIZE);
 
-    for (unsigned i = 0; i < thr.log_fds.size(); i++) {
-        if (write(thr.log_fds[i], thr.log_buf, (int) len) < len)
-            perror("short write");
-    }
+    uint64_t *log_buf = (uint64_t *) thr.log_buf;
+    log_buf[0] = TThread::id();
+    log_buf[1] = thr.log_buf_used;
+    log_buf[2] = thr.max_logged_tid;
+
+    LogSend::enqueue_batch(thr.log_buf, thr.log_buf_used);
 
     if (debug_txn_log)
-        std::cout << "Thread " << TThread::id() << " flushed " << len << " bytes\n";
+        std::cout << "Thread " << TThread::id() << " flushed " << thr.log_buf_used << " bytes\n";
     thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
+    thr.log_buf = LogSend::get_buffer();
 
-    thr.log_stats.bytes += len;
+    thr.log_stats.bytes += thr.log_buf_used;
     thr.log_stats.bufs++;
 }
 

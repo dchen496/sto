@@ -31,6 +31,7 @@ void test_many_writes(int batch) {
         Transaction::register_object(refs[i], i + n);
     }
     assert(LogApply::listen(1, 1, port) == 0);
+
     assert(LogApply::txns_processed[0] == niters + 1);
     for (int i = 0; i < n; i++)
         assert(fs[i].nontrans_read() == refs[i].nontrans_read());

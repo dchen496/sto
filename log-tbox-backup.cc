@@ -24,8 +24,8 @@ void test_multithreaded_int() {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 6) {
-        printf("usage: log-tbox-backup nrecv_threads napply_threads niters txnsize listen_host start_port");
+    if (argc != 7) {
+        printf("usage: log-tbox-backup nrecv_threads napply_threads niters txnsize listen_host start_port\n");
         return -1;
     }
 

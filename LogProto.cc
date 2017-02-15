@@ -4,6 +4,160 @@
 #include "Serializer.hh"
 #include <deque>
 
+volatile bool LogSend::run;
+
+int LogSend::nsend_threads;
+pthread_t LogSend::send_threads[MAX_THREADS];
+LogSend::ThreadArgs LogSend::send_thread_args[MAX_THREADS];
+
+std::mutex LogSend::send_mutexes[MAX_THREADS];
+std::queue<LogSend::LogBatch> LogSend::batch_queue[MAX_THREADS];
+std::condition_variable LogSend::batch_queue_wait[MAX_THREADS];
+
+int LogSend::nworker_threads;
+std::mutex LogSend::worker_mutexes[MAX_THREADS];
+std::queue<LogSend::LogBatch> LogSend::free_queue[MAX_THREADS];
+
+int LogSend::create_threads(unsigned nsend_threads, unsigned nworker_threads, std::vector<std::string> hosts, int start_port) {
+    run = true;
+    LogSend::nsend_threads = nsend_threads;
+    for (unsigned i = 0; i < nsend_threads; i++) {
+        ThreadArgs &args = send_thread_args[i];
+        args.thread_id = i;
+
+        for (unsigned j = 0; j < hosts.size(); j++) {
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) {
+                perror("couldn't create socket");
+                return -1;
+            }
+
+            struct sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = inet_addr(hosts[j].c_str());
+            addr.sin_port = htons(start_port + i);
+            if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+                perror("couldn't connect to backup");
+                return -1;
+            }
+            args.fds.push_back(fd);
+        }
+
+        pthread_create(&send_threads[i], nullptr, &sender, (void *) &send_thread_args[i]);
+    }
+    LogSend::nworker_threads = nworker_threads;
+    return 0;
+}
+
+void LogSend::stop() {
+    // stop our own threads
+    run = false;
+    for (int i = 0; i < nsend_threads; i++) {
+        batch_queue_wait[i].notify_all(); // stop the thread from waiting
+        pthread_join(send_threads[i], nullptr);
+        assert(batch_queue[i].empty());
+    }
+
+    // signal to backups that there are no more log entries
+    for (int i = 0; i < nsend_threads; i++) {
+        for (int fd : send_thread_args[i].fds)
+            shutdown(fd, SHUT_WR);
+    }
+
+    // wait for backups to finish sending acks, then close the socket
+    for (int i = 0; i < nsend_threads; i++) {
+        for (int fd : send_thread_args[i].fds) {
+            Transaction::tid_type tid;
+            while (read(fd, &tid, sizeof(tid)) > 0)
+                ;
+            close(fd);
+        }
+        send_thread_args[i].fds.clear();
+    }
+
+    // free buffers
+    for (int i = 0; i < nworker_threads; i++) {
+        std::unique_lock<std::mutex> lk(worker_mutexes[i]);
+        while (!free_queue[i].empty()) {
+            LogBatch &batch = free_queue[i].front();
+            delete[] batch.buf;
+            free_queue[i].pop();
+        }
+    }
+}
+
+void LogSend::enqueue_batch(char *buf, int len) {
+    int id = TThread::id();
+    threadinfo_t &thr = Transaction::tinfo[id];
+    int sid = thr.log_send_thread;
+
+    LogBatch batch = { .worker_id = id, .buf = buf, .len = len };
+
+    {
+        std::unique_lock<std::mutex> lk(send_mutexes[sid]);
+
+        while ((int) batch_queue[sid].size() >= 2 * nworker_threads / nsend_threads)
+            batch_queue_wait[sid].wait(lk);
+
+        batch_queue[sid].push(batch);
+        batch_queue_wait[sid].notify_all();
+    }
+}
+
+char *LogSend::get_buffer() {
+    int id = TThread::id();
+    char *ret = nullptr;
+    {
+        std::unique_lock<std::mutex> lk(worker_mutexes[id]);
+        if (!free_queue[id].empty()) {
+            ret = free_queue[id].front().buf;
+            free_queue[id].pop();
+        }
+    }
+    if (!ret)
+        ret = new char[STO_LOG_BUF_SIZE];
+    return ret;
+}
+
+void *LogSend::sender(void *argsptr) {
+    ThreadArgs &args = *(ThreadArgs *) argsptr;
+    int id = args.thread_id;
+    std::queue<LogBatch> &q = batch_queue[id];
+
+    while (true) {
+        LogBatch batch;
+        {
+            std::unique_lock<std::mutex> lk(send_mutexes[id]);
+            while (run && q.empty())
+                batch_queue_wait[id].wait(lk);
+            if (!run && q.empty())
+                break;
+
+            batch = q.front();
+            q.pop();
+            // we only need to wake up one blocked worker
+            batch_queue_wait[id].notify_one();
+        }
+        for (unsigned i = 0; i < args.fds.size(); i++) {
+            // XXX: replace with write_all
+            if (write(args.fds[i], batch.buf, batch.len) < batch.len) {
+                perror("short write");
+                return nullptr;
+            }
+        }
+        int wid = batch.worker_id;
+        {
+            std::unique_lock<std::mutex> lk(worker_mutexes[wid]);
+            free_queue[id].push(batch);
+        }
+    }
+
+    return nullptr;
+}
+
+
+volatile bool LogApply::run;
+
 bool LogApply::debug_txn_log = STO_DEBUG_TXN_LOG;
 uint64_t LogApply::txns_processed[MAX_THREADS];
 
@@ -18,8 +172,6 @@ pthread_t LogApply::apply_threads[MAX_THREADS];
 LogApply::ThreadArgs LogApply::apply_thread_args[MAX_THREADS];
 
 pthread_t LogApply::advance_thread;
-
-volatile bool LogApply::run;
 
 std::mutex LogApply::apply_mutexes[MAX_THREADS];
 std::queue<LogApply::LogBatch> LogApply::batch_queue[MAX_THREADS];
@@ -83,10 +235,13 @@ int LogApply::listen(unsigned nrecv_threads, unsigned napply_threads, int start_
     for (unsigned i = 0; i < nrecv_threads; i++)
         pthread_join(recv_threads[i], nullptr);
 
+    run = false;
+    for (unsigned i = 0; i < napply_threads; i++)
+        batch_queue_wait[i].notify_all();
+
     for (unsigned i = 0; i < napply_threads; i++)
         pthread_join(apply_threads[i], nullptr);
 
-    run = false;
     fence();
 
     pthread_join(advance_thread, nullptr);
@@ -132,14 +287,22 @@ void *LogApply::receiver(void * argsptr) {
             break;
 
         {
-            int thid = batch.thread_id;
-            std::unique_lock<std::mutex> lk(apply_mutexes[thid]);
-            // we require that batches be sent in order to the apply thread
-            // to avoid issues with missing batches
-            assert(received_tids[thid] <= batch.max_tid);
-            received_tids[thid] = batch.max_tid;
+            int bid = batch.thread_id;
+            std::unique_lock<std::mutex> lk(apply_mutexes[bid]);
+
+            // batches are sent in order to the apply thread
+            assert(received_tids[bid] <= batch.max_tid);
+            received_tids[bid] = batch.max_tid;
             batch.recv_thr_id = id;
-            batch_queue[thid].push(batch);
+
+            // don't accumulate more than 1 buffer per thread
+            // waiting here creates back-pressure on the sender
+            // XXX: is this the right number?
+            while (batch_queue[bid].size() >= 1)
+                batch_queue_wait[bid].wait(lk);
+
+            batch_queue[bid].push(batch);
+            batch_queue_wait[bid].notify_all();
         }
     }
 
@@ -205,13 +368,16 @@ void *LogApply::applier(void *argsptr) {
 
     std::queue<LogBatch> batches;
 
-    while (run) {
+    while (true) {
         if (batches.empty()) {
             std::unique_lock<std::mutex> lk(apply_mutexes[id]);
-            while (batch_queue[id].empty())
+            while (run && batch_queue[id].empty())
                 batch_queue_wait[id].wait(lk);
-            batches.push(batch_queue[id].front());
+            if (!run && batch_queue[id].empty())
+                break;
+            batches.push(std::move(batch_queue[id].front()));
             batch_queue[id].pop();
+            batch_queue_wait[id].notify_one();
         }
 
         uint64_t max_tid = min_received_tid;
@@ -230,7 +396,7 @@ void *LogApply::applier(void *argsptr) {
                 batches.pop();
             }
         } else {
-            relax_fence();
+            usleep(1000);
         }
     }
 
@@ -289,13 +455,15 @@ char *LogApply::process_txn(char *ptr) {
 
 int LogApply::advance() {
     fence();
-    Transaction::tid_type new_valid = received_tids[0];
-    for (int i = 1; i < napply_threads; i++)
+    Transaction::tid_type new_valid = ~0ULL;
+    for (int i = 0; i < napply_threads; i++) {
+        std::unique_lock<std::mutex> lk(apply_mutexes[i]);
         new_valid = std::min(new_valid, received_tids[i]);
+    }
     min_received_tid = new_valid;
     release_fence();
 
-    for (int i = 0; i < napply_threads; i++) {
+    for (int i = 0; i < nrecv_threads; i++) {
         int len = sizeof(uint64_t);
         if (write(sock_fds[i], &min_received_tid, len) < len) {
             perror("short write");

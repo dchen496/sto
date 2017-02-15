@@ -8,10 +8,36 @@
 class LogSend {
   struct ThreadArgs {
     int thread_id;
+    std::vector<int> fds;
+  };
+
+  struct LogBatch {
+    int worker_id;
+    char *buf;
+    int len;
   };
 
 public:
+  static int create_threads(unsigned nsend_threads, unsigned nworker_threads, std::vector<std::string> hosts, int start_port);
+  static void stop();
+  static void enqueue_batch(char *buf, int len);
+  static char* get_buffer();
 
+private:
+  static void *sender(void *argsptr);
+
+  static volatile bool run;
+
+  static int nsend_threads;
+  static pthread_t send_threads[MAX_THREADS];
+  static ThreadArgs send_thread_args[MAX_THREADS];
+  static std::mutex send_mutexes[MAX_THREADS];
+  static std::queue<LogBatch> batch_queue[MAX_THREADS];
+  static std::condition_variable batch_queue_wait[MAX_THREADS];
+
+  static int nworker_threads;
+  static std::mutex worker_mutexes[MAX_THREADS];
+  static std::queue<LogBatch> free_queue[MAX_THREADS];
 };
 
 class LogApply {
@@ -49,6 +75,8 @@ private:
   static int advance();
   static void run_cleanup();
 
+  static volatile bool run;
+
   static int nrecv_threads;
   static int listen_fds[MAX_THREADS];
   static int sock_fds[MAX_THREADS];
@@ -60,8 +88,6 @@ private:
   static ThreadArgs apply_thread_args[MAX_THREADS];
 
   static pthread_t advance_thread;
-
-  static volatile bool run;
 
   static std::mutex apply_mutexes[MAX_THREADS];
   static std::queue<LogBatch> batch_queue[MAX_THREADS];
