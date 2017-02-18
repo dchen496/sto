@@ -6,11 +6,6 @@
 #include <condition_variable>
 
 class LogSend {
-  struct ThreadArgs {
-    int thread_id;
-    std::vector<int> fds;
-  };
-
   struct LogBatch {
     int worker_id;
     char *buf;
@@ -28,16 +23,25 @@ private:
 
   static volatile bool run;
 
+  struct __attribute__((aligned(128))) SendThread {
+    int thread_id;
+    pthread_t handle;
+    std::vector<int> fds;
+    std::mutex mu;
+    std::queue<LogBatch> batch_queue;
+    std::condition_variable batch_queue_cond;
+  };
+
   static int nsend_threads;
-  static pthread_t send_threads[MAX_THREADS];
-  static ThreadArgs send_thread_args[MAX_THREADS];
-  static std::mutex send_mutexes[MAX_THREADS];
-  static std::queue<LogBatch> batch_queue[MAX_THREADS];
-  static std::condition_variable batch_queue_wait[MAX_THREADS];
+  static SendThread send_threads[MAX_THREADS];
+
+  struct __attribute__((aligned(128))) WorkerThread {
+    std::mutex mu;
+    std::queue<LogBatch> free_queue;
+  };
 
   static int nworker_threads;
-  static std::mutex worker_mutexes[MAX_THREADS];
-  static std::queue<LogBatch> free_queue[MAX_THREADS];
+  static WorkerThread worker_threads[MAX_THREADS];
 };
 
 class LogApply {
@@ -77,27 +81,33 @@ private:
 
   static volatile bool run;
 
+  struct __attribute__((aligned(128))) RecvThread {
+    int thread_id;
+    pthread_t handle;
+    int listen_fd;
+    int sock_fd;
+    std::mutex mu;
+    std::queue<LogBatch> free_queue;
+  };
+
   static int nrecv_threads;
-  static int listen_fds[MAX_THREADS];
-  static int sock_fds[MAX_THREADS];
-  static pthread_t recv_threads[MAX_THREADS];
-  static ThreadArgs recv_thread_args[MAX_THREADS];
+  static RecvThread recv_threads[MAX_THREADS];
+
+  struct __attribute__((aligned(128))) ApplyThread {
+    int thread_id;
+    pthread_t handle;
+
+    std::mutex mu;
+    std::queue<LogBatch> batch_queue;
+    std::condition_variable batch_queue_cond;
+    Transaction::tid_type received_tid;
+    Transaction::tid_type processed_tid;
+    std::vector<std::function<void()>> cleanup_callbacks;
+  };
 
   static int napply_threads;
-  static pthread_t apply_threads[MAX_THREADS];
-  static ThreadArgs apply_thread_args[MAX_THREADS];
+  static ApplyThread apply_threads[MAX_THREADS];
 
   static pthread_t advance_thread;
-
-  static std::mutex apply_mutexes[MAX_THREADS];
-  static std::queue<LogBatch> batch_queue[MAX_THREADS];
-  static std::condition_variable batch_queue_wait[MAX_THREADS];
-  static Transaction::tid_type received_tids[MAX_THREADS];
   static Transaction::tid_type min_received_tid;
-  static Transaction::tid_type processed_tids[MAX_THREADS];
-
-  static std::mutex recv_mutexes[MAX_THREADS];
-  static std::queue<LogBatch> free_queue[MAX_THREADS];
-
-  static std::vector<std::function<void()>> cleanup_callbacks[MAX_THREADS];
 };

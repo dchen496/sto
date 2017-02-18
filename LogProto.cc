@@ -7,23 +7,17 @@
 volatile bool LogSend::run;
 
 int LogSend::nsend_threads;
-pthread_t LogSend::send_threads[MAX_THREADS];
-LogSend::ThreadArgs LogSend::send_thread_args[MAX_THREADS];
-
-std::mutex LogSend::send_mutexes[MAX_THREADS];
-std::queue<LogSend::LogBatch> LogSend::batch_queue[MAX_THREADS];
-std::condition_variable LogSend::batch_queue_wait[MAX_THREADS];
+LogSend::SendThread LogSend::send_threads[MAX_THREADS];
 
 int LogSend::nworker_threads;
-std::mutex LogSend::worker_mutexes[MAX_THREADS];
-std::queue<LogSend::LogBatch> LogSend::free_queue[MAX_THREADS];
+LogSend::WorkerThread LogSend::worker_threads[MAX_THREADS];
 
 int LogSend::create_threads(unsigned nsend_threads, unsigned nworker_threads, std::vector<std::string> hosts, int start_port) {
     run = true;
     LogSend::nsend_threads = nsend_threads;
     for (unsigned i = 0; i < nsend_threads; i++) {
-        ThreadArgs &args = send_thread_args[i];
-        args.thread_id = i;
+        SendThread &thr = send_threads[i];
+        thr.thread_id = i;
 
         for (unsigned j = 0; j < hosts.size(); j++) {
             int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -40,10 +34,10 @@ int LogSend::create_threads(unsigned nsend_threads, unsigned nworker_threads, st
                 perror("couldn't connect to backup");
                 return -1;
             }
-            args.fds.push_back(fd);
+            thr.fds.push_back(fd);
         }
 
-        pthread_create(&send_threads[i], nullptr, &sender, (void *) &send_thread_args[i]);
+        pthread_create(&thr.handle, nullptr, &sender, (void *) &thr);
     }
     LogSend::nworker_threads = nworker_threads;
     return 0;
@@ -53,35 +47,37 @@ void LogSend::stop() {
     // stop our own threads
     run = false;
     for (int i = 0; i < nsend_threads; i++) {
-        batch_queue_wait[i].notify_all(); // stop the thread from waiting
-        pthread_join(send_threads[i], nullptr);
-        assert(batch_queue[i].empty());
+        SendThread &thr = send_threads[i];
+        thr.batch_queue_cond.notify_all(); // stop the thread from waiting
+        pthread_join(thr.handle, nullptr);
+        assert(thr.batch_queue.empty());
     }
 
     // signal to backups that there are no more log entries
     for (int i = 0; i < nsend_threads; i++) {
-        for (int fd : send_thread_args[i].fds)
+        for (int fd : send_threads[i].fds)
             shutdown(fd, SHUT_WR);
     }
 
     // wait for backups to finish sending acks, then close the socket
     for (int i = 0; i < nsend_threads; i++) {
-        for (int fd : send_thread_args[i].fds) {
+        for (int fd : send_threads[i].fds) {
             Transaction::tid_type tid;
             while (read(fd, &tid, sizeof(tid)) > 0)
                 ;
             close(fd);
         }
-        send_thread_args[i].fds.clear();
+        send_threads[i].fds.clear();
     }
 
     // free buffers
     for (int i = 0; i < nworker_threads; i++) {
-        std::unique_lock<std::mutex> lk(worker_mutexes[i]);
-        while (!free_queue[i].empty()) {
-            LogBatch &batch = free_queue[i].front();
+        WorkerThread &thr = worker_threads[i];
+        std::unique_lock<std::mutex> lk(thr.mu);
+        while (!thr.free_queue.empty()) {
+            LogBatch &batch = thr.free_queue.front();
             delete[] batch.buf;
-            free_queue[i].pop();
+            thr.free_queue.pop();
         }
     }
 }
@@ -89,29 +85,29 @@ void LogSend::stop() {
 void LogSend::enqueue_batch(char *buf, int len) {
     int id = TThread::id();
     threadinfo_t &thr = Transaction::tinfo[id];
-    int sid = thr.log_send_thread;
+    SendThread &sthr = send_threads[thr.log_send_thread];
 
     LogBatch batch = { .worker_id = id, .buf = buf, .len = len };
 
     {
-        std::unique_lock<std::mutex> lk(send_mutexes[sid]);
+        std::unique_lock<std::mutex> lk(sthr.mu);
 
-        while ((int) batch_queue[sid].size() >= 2 * nworker_threads / nsend_threads)
-            batch_queue_wait[sid].wait(lk);
+        while ((int) sthr.batch_queue.size() >= 2 * nworker_threads / nsend_threads)
+            sthr.batch_queue_cond.wait(lk);
 
-        batch_queue[sid].push(batch);
-        batch_queue_wait[sid].notify_all();
+        sthr.batch_queue.push(batch);
+        sthr.batch_queue_cond.notify_all();
     }
 }
 
 char *LogSend::get_buffer() {
-    int id = TThread::id();
+    WorkerThread &thr = worker_threads[TThread::id()];
     char *ret = nullptr;
     {
-        std::unique_lock<std::mutex> lk(worker_mutexes[id]);
-        if (!free_queue[id].empty()) {
-            ret = free_queue[id].front().buf;
-            free_queue[id].pop();
+        std::unique_lock<std::mutex> lk(thr.mu);
+        if (!thr.free_queue.empty()) {
+            ret = thr.free_queue.front().buf;
+            thr.free_queue.pop();
         }
     }
     if (!ret)
@@ -120,35 +116,33 @@ char *LogSend::get_buffer() {
 }
 
 void *LogSend::sender(void *argsptr) {
-    ThreadArgs &args = *(ThreadArgs *) argsptr;
-    int id = args.thread_id;
-    std::queue<LogBatch> &q = batch_queue[id];
+    SendThread &thr = *(SendThread *) argsptr;
 
     while (true) {
         LogBatch batch;
         {
-            std::unique_lock<std::mutex> lk(send_mutexes[id]);
-            while (run && q.empty())
-                batch_queue_wait[id].wait(lk);
-            if (!run && q.empty())
+            std::unique_lock<std::mutex> lk(thr.mu);
+            while (run && thr.batch_queue.empty())
+                thr.batch_queue_cond.wait(lk);
+            if (!run && thr.batch_queue.empty())
                 break;
 
-            batch = q.front();
-            q.pop();
+            batch = thr.batch_queue.front();
+            thr.batch_queue.pop();
             // we only need to wake up one blocked worker
-            batch_queue_wait[id].notify_one();
+            thr.batch_queue_cond.notify_one();
         }
-        for (unsigned i = 0; i < args.fds.size(); i++) {
+        for (unsigned i = 0; i < thr.fds.size(); i++) {
             // XXX: replace with write_all
-            if (write(args.fds[i], batch.buf, batch.len) < batch.len) {
+            if (write(thr.fds[i], batch.buf, batch.len) < batch.len) {
                 perror("short write");
                 return nullptr;
             }
         }
-        int wid = batch.worker_id;
+        WorkerThread &wthr = worker_threads[batch.worker_id];
         {
-            std::unique_lock<std::mutex> lk(worker_mutexes[wid]);
-            free_queue[id].push(batch);
+            std::unique_lock<std::mutex> lk(wthr.mu);
+            wthr.free_queue.push(batch);
         }
     }
 
@@ -162,28 +156,13 @@ bool LogApply::debug_txn_log = STO_DEBUG_TXN_LOG;
 uint64_t LogApply::txns_processed[MAX_THREADS];
 
 int LogApply::nrecv_threads;
-int LogApply::listen_fds[MAX_THREADS];
-int LogApply::sock_fds[MAX_THREADS];
-pthread_t LogApply::recv_threads[MAX_THREADS];
-LogApply::ThreadArgs LogApply::recv_thread_args[MAX_THREADS];
+LogApply::RecvThread LogApply::recv_threads[MAX_THREADS];
 
 int LogApply::napply_threads;
-pthread_t LogApply::apply_threads[MAX_THREADS];
-LogApply::ThreadArgs LogApply::apply_thread_args[MAX_THREADS];
+LogApply::ApplyThread LogApply::apply_threads[MAX_THREADS];
 
 pthread_t LogApply::advance_thread;
-
-std::mutex LogApply::apply_mutexes[MAX_THREADS];
-std::queue<LogApply::LogBatch> LogApply::batch_queue[MAX_THREADS];
-std::condition_variable LogApply::batch_queue_wait[MAX_THREADS];
-Transaction::tid_type LogApply::received_tids[MAX_THREADS];
 Transaction::tid_type LogApply::min_received_tid = 0; // 0 is lower than any valid TID
-Transaction::tid_type LogApply::processed_tids[MAX_THREADS];
-
-std::mutex LogApply::recv_mutexes[MAX_THREADS];
-std::queue<LogApply::LogBatch> LogApply::free_queue[MAX_THREADS];
-
-std::vector<std::function<void()>> LogApply::cleanup_callbacks[MAX_THREADS];
 
 int LogApply::listen(unsigned nrecv_threads, unsigned napply_threads, int start_port) {
     run = true;
@@ -192,55 +171,55 @@ int LogApply::listen(unsigned nrecv_threads, unsigned napply_threads, int start_
 
     LogApply::nrecv_threads = nrecv_threads;
     for (unsigned i = 0; i < nrecv_threads; i++) {
-        sock_fds[i] = -1; // ensure that advance_thread waits for all sockets
-        listen_fds[i] = socket(AF_INET, SOCK_STREAM, 0);
-        if (listen_fds[i] < 0) {
+        RecvThread &thr = recv_threads[i];
+        thr.thread_id = i;
+        thr.sock_fd = -1; // ensure that advance_thread waits for all sockets
+        thr.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (thr.listen_fd < 0) {
             perror("couldn't create socket");
             return -1;
         }
 
         // XXX: nice to have for debugging, but maybe not a good idea in general
         int enable = 1;
-        setsockopt(listen_fds[i], SOL_SOCKET, SO_REUSEADDR, (void *) &enable, sizeof(int));
+        setsockopt(thr.listen_fd, SOL_SOCKET, SO_REUSEADDR, (void *) &enable, sizeof(int));
 
         struct sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_port = htons(start_port + i);
-        if (bind(listen_fds[i], (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+        if (bind(thr.listen_fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
             perror("couldn't bind to socket");
             return -1;
         }
-        if (::listen(listen_fds[i], 1) < 0) {
+        if (::listen(thr.listen_fd, 1) < 0) {
             perror("couldn't listen to socket");
             return -1;
         }
-
-        recv_thread_args[i].thread_id = i;
-        pthread_create(&recv_threads[i], nullptr, &receiver, (void *) &recv_thread_args[i]);
+        pthread_create(&thr.handle, nullptr, &receiver, (void *) &thr);
     }
 
     LogApply::napply_threads = napply_threads;
     for (unsigned i = 0; i < napply_threads; i++) {
-        received_tids[i] = 0;
-        processed_tids[i] = 0;
+        ApplyThread &thr = apply_threads[i];
+        thr.thread_id = i;
+        thr.received_tid = 0;
+        thr.processed_tid = 0;
         txns_processed[i] = 0;
-
-        apply_thread_args[i].thread_id = i;
-        pthread_create(&apply_threads[i], nullptr, &applier, (void *) &apply_thread_args[i]);
+        pthread_create(&thr.handle, nullptr, &applier, (void *) &thr);
     }
 
     pthread_create(&advance_thread, nullptr, &advancer, nullptr);
 
     for (unsigned i = 0; i < nrecv_threads; i++)
-        pthread_join(recv_threads[i], nullptr);
+        pthread_join(recv_threads[i].handle, nullptr);
 
     run = false;
     for (unsigned i = 0; i < napply_threads; i++)
-        batch_queue_wait[i].notify_all();
+        apply_threads[i].batch_queue_cond.notify_all();
 
     for (unsigned i = 0; i < napply_threads; i++)
-        pthread_join(apply_threads[i], nullptr);
+        pthread_join(apply_threads[i].handle, nullptr);
 
     fence();
 
@@ -248,10 +227,11 @@ int LogApply::listen(unsigned nrecv_threads, unsigned napply_threads, int start_
     advance();
 
     // at this point, everyone is done sending
-    for (unsigned i = 0; i < napply_threads; i++) {
-        shutdown(sock_fds[i], SHUT_WR);
-        close(sock_fds[i]);
-        close(listen_fds[i]);
+    for (unsigned i = 0; i < nrecv_threads; i++) {
+        RecvThread &thr = recv_threads[i];
+        shutdown(thr.sock_fd, SHUT_WR);
+        close(thr.sock_fd);
+        close(thr.listen_fd);
     }
 
     return 0;
@@ -261,11 +241,11 @@ void LogApply::stop() {
     run = false;
 }
 
-void *LogApply::receiver(void * argsptr) {
-    int id = ((ThreadArgs *) argsptr)->thread_id;
+void *LogApply::receiver(void* argsptr) {
+    RecvThread &thr = *(RecvThread *) argsptr;
 
-    sock_fds[id] = accept(listen_fds[id], NULL, NULL);
-    if (sock_fds[id] < 0) {
+    thr.sock_fd = accept(thr.listen_fd, NULL, NULL);
+    if (thr.sock_fd < 0) {
         perror("couldn't accept connection");
         return nullptr;
     }
@@ -275,34 +255,35 @@ void *LogApply::receiver(void * argsptr) {
     // terminates when the primary disconnects
     while (run) {
         {
-            std::unique_lock<std::mutex> lk(recv_mutexes[id]);
-            while (!free_queue[id].empty()) {
-                buffer_pool.push_back(free_queue[id].front().buf);
-                free_queue[id].pop();
+            std::unique_lock<std::mutex> lk(thr.mu);
+            while (!thr.free_queue.empty()) {
+                buffer_pool.push_back(thr.free_queue.front().buf);
+                thr.free_queue.pop();
             }
         }
 
         LogBatch batch;
-        if (!read_batch(sock_fds[id], buffer_pool, batch))
+        if (!read_batch(thr.sock_fd, buffer_pool, batch))
             break;
 
         {
-            int bid = batch.thread_id;
-            std::unique_lock<std::mutex> lk(apply_mutexes[bid]);
+            int aid = batch.thread_id;
+            ApplyThread &athr = apply_threads[aid];
+            std::unique_lock<std::mutex> lk(athr.mu);
 
             // batches are sent in order to the apply thread
-            assert(received_tids[bid] <= batch.max_tid);
-            received_tids[bid] = batch.max_tid;
-            batch.recv_thr_id = id;
+            assert(athr.received_tid <= batch.max_tid);
+            athr.received_tid = batch.max_tid;
+            batch.recv_thr_id = thr.thread_id;
 
             // don't accumulate more than 1 buffer per thread
             // waiting here creates back-pressure on the sender
             // XXX: is this the right number?
-            while (batch_queue[bid].size() >= 1)
-                batch_queue_wait[bid].wait(lk);
+            while (athr.batch_queue.size() >= 1)
+                athr.batch_queue_cond.wait(lk);
 
-            batch_queue[bid].push(batch);
-            batch_queue_wait[bid].notify_all();
+            athr.batch_queue.push(batch);
+            athr.batch_queue_cond.notify_all();
         }
     }
 
@@ -363,21 +344,21 @@ bool LogApply::read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatc
 }
 
 void *LogApply::applier(void *argsptr) {
-    int id = ((ThreadArgs *) argsptr)->thread_id;
-    TThread::set_id(id);
+    ApplyThread &thr = *(ApplyThread *) argsptr;
+    TThread::set_id(thr.thread_id);
 
     std::queue<LogBatch> batches;
 
     while (true) {
         if (batches.empty()) {
-            std::unique_lock<std::mutex> lk(apply_mutexes[id]);
-            while (run && batch_queue[id].empty())
-                batch_queue_wait[id].wait(lk);
-            if (!run && batch_queue[id].empty())
+            std::unique_lock<std::mutex> lk(thr.mu);
+            while (run && thr.batch_queue.empty())
+                thr.batch_queue_cond.wait(lk);
+            if (!run && thr.batch_queue.empty())
                 break;
-            batches.push(std::move(batch_queue[id].front()));
-            batch_queue[id].pop();
-            batch_queue_wait[id].notify_one();
+            batches.push(std::move(thr.batch_queue.front()));
+            thr.batch_queue.pop();
+            thr.batch_queue_cond.notify_one();
         }
 
         uint64_t max_tid = min_received_tid;
@@ -390,8 +371,9 @@ void *LogApply::applier(void *argsptr) {
                 if (batch.needs_free) {
                     delete[] batch.buf;
                 } else {
-                    std::unique_lock<std::mutex> lk(recv_mutexes[batch.recv_thr_id]);
-                    free_queue[batch.recv_thr_id].push(batch);
+                    RecvThread &rthr = recv_threads[batch.recv_thr_id];
+                    std::unique_lock<std::mutex> lk(rthr.mu);
+                    rthr.free_queue.push(batch);
                 }
                 batches.pop();
             }
@@ -414,13 +396,13 @@ char *LogApply::process_batch_part(LogBatch &batch, uint64_t max_tid) {
 }
 
 char *LogApply::process_txn(char *ptr) {
-    int id = TThread::id();
-    txns_processed[id]++;
+    ApplyThread &thr = apply_threads[TThread::id()];
+    txns_processed[thr.thread_id]++;
 
     Transaction::tid_type tid;
     ptr += Serializer<Transaction::tid_type>::deserialize(ptr, tid);
-    assert(tid > processed_tids[id]);
-    processed_tids[id] = tid;
+    assert(tid > thr.processed_tid);
+    thr.processed_tid = tid;
 
     uint64_t nentries;
     ptr += Serializer<uint64_t>::deserialize(ptr, nentries);
@@ -457,15 +439,17 @@ int LogApply::advance() {
     fence();
     Transaction::tid_type new_valid = ~0ULL;
     for (int i = 0; i < napply_threads; i++) {
-        std::unique_lock<std::mutex> lk(apply_mutexes[i]);
-        new_valid = std::min(new_valid, received_tids[i]);
+        ApplyThread &thr = apply_threads[i];
+        std::unique_lock<std::mutex> lk(thr.mu);
+        new_valid = std::min(new_valid, thr.received_tid);
     }
     min_received_tid = new_valid;
     release_fence();
 
     for (int i = 0; i < nrecv_threads; i++) {
+        RecvThread &thr = recv_threads[i];
         int len = sizeof(uint64_t);
-        if (write(sock_fds[i], &min_received_tid, len) < len) {
+        if (write(thr.sock_fd, &min_received_tid, len) < len) {
             perror("short write");
             return -1;
         }
@@ -477,8 +461,8 @@ void *LogApply::advancer(void *) {
     // spin until all sockets are connected
     while (run) {
         bool wait = false;
-        for (int i = 0; i < napply_threads; i++) {
-            if (sock_fds[i] < 0)
+        for (int i = 0; i < nrecv_threads; i++) {
+            if (recv_threads[i].sock_fd < 0)
                 wait = true;
         }
         if (!wait)
@@ -498,15 +482,15 @@ void *LogApply::advancer(void *) {
 }
 
 void LogApply::run_cleanup() {
-    int id = TThread::id();
-    while (cleanup_callbacks[id].size() > 0) {
-        std::vector<std::function<void()>> callbacks = cleanup_callbacks[id];
-        cleanup_callbacks[id].clear();
+    ApplyThread &thr = apply_threads[TThread::id()];
+    while (thr.cleanup_callbacks.size() > 0) {
+        std::vector<std::function<void()>> callbacks = thr.cleanup_callbacks;
+        thr.cleanup_callbacks.clear();
         for (std::function<void()> callback : callbacks)
             callback();
     }
 }
 
 void LogApply::cleanup(std::function<void()> callback) {
-    cleanup_callbacks[TThread::id()].push_back(callback);
+    apply_threads[TThread::id()].cleanup_callbacks.push_back(callback);
 }
