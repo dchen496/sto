@@ -16,7 +16,7 @@ void test_simple_int(int batch) {
     usleep(startup_delay);
     TBox<int> f;
     Transaction::register_object(f, 0);
-    assert(Transaction::init_logging(1, 1, {host}, port) == 0);
+    assert(Transaction::init_logging(1, {host}, port) == 0);
 
     for (int i = 0; i < 20; i++) {
         int val = batch ? (i + 50) : i;
@@ -52,7 +52,7 @@ void test_many_writes(int batch) {
         fs[i].nontrans_write(i);
         refs[i].nontrans_write(0);
     }
-    assert(Transaction::init_logging(1, 1, {host}, port) == 0);
+    assert(Transaction::init_logging(1, {host}, port) == 0);
 
     for (int i = 0; i < niters; i++) {
         int a = (i * 17) % n;
@@ -74,7 +74,6 @@ void test_many_writes(int batch) {
         }
     }
     Transaction::flush_log_batch();
-
     Transaction::stop_logging();
     Transaction::clear_registered_objects();
     printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
@@ -129,7 +128,7 @@ void test_multithreaded(int batch) {
     for (int i = 0; i < nthread; i++)
         Transaction::register_object(ntxns[i], i + 2 * n);
 
-    assert(Transaction::init_logging(2, nthread, {host}, port) == 0);
+    assert(Transaction::init_logging(nthread, {host}, port) == 0);
     pthread_t thrs[nthread];
     ThreadArgs args[nthread];
     for (int i = 0; i < nthread; i++) {
@@ -160,7 +159,7 @@ void test_simple_string() {
     usleep(startup_delay);
     TBox<std::string> f;
     Transaction::register_object(f, 0);
-    assert(Transaction::init_logging(1, 1, {host}, port) == 0);
+    assert(Transaction::init_logging(1, {host}, port) == 0);
 
     for (int i = 0; i < 20; i++) {
         std::stringstream ss;

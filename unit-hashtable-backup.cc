@@ -12,7 +12,7 @@ const int niters = 2000000;
 void test_simple_int(int batch) {
     Hashtable<int, int> f;
     Transaction::register_object(f, 0);
-    assert(LogApply::listen(1, 1, port) == 0);
+    assert(LogApply::listen(1, port) == 0);
 
     int v1 = -1, v2 = -1;
     bool found1 = false, found2 = false;

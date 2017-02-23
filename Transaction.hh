@@ -71,7 +71,7 @@
 #endif
 
 #define STO_LOG_BUF_SIZE (128 * 1024)
-#define STO_LOG_BATCH_HEADER_SIZE (3 * sizeof(uint64_t))
+#define STO_LOG_BATCH_HEADER_SIZE (2 * sizeof(uint64_t))
 #define STO_LOG_MAX_BATCH (STO_LOG_BUF_SIZE - STO_LOG_BATCH_HEADER_SIZE)
 
 #define STO_DEBUG_TXN_LOG 1
@@ -208,7 +208,6 @@ struct __attribute__((aligned(128))) threadinfo_t {
     TransactionTid::type max_logged_tid;
     TransactionTid::type max_synced_tid;
     log_stats_t log_stats;
-    int log_send_thread;
 
     threadinfo_t() :
         epoch(0),
@@ -216,8 +215,7 @@ struct __attribute__((aligned(128))) threadinfo_t {
         log_buf_used(0),
         max_logged_tid(0),
         max_synced_tid(0),
-        log_stats(),
-        log_send_thread() {
+        log_stats() {
     }
 
     ~threadinfo_t() {
@@ -308,7 +306,7 @@ public:
 #define TXP_INCREMENT(p) Transaction::txp_account<(p)>(1)
 #define TXP_ACCOUNT(p, n) Transaction::txp_account<(p)>((n))
 
-    static int init_logging(unsigned nsend_threads, unsigned nworker_threads, std::vector<std::string> hosts, int start_port);
+    static int init_logging(unsigned nthreads, std::vector<std::string> hosts, int start_port);
     static void stop_logging();
     static void register_object(TObject &obj, uint64_t id) {
       void *ptr = &obj;

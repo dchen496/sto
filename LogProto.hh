@@ -13,7 +13,7 @@ class LogSend {
   };
 
 public:
-  static int create_threads(unsigned nsend_threads, unsigned nworker_threads, std::vector<std::string> hosts, int start_port);
+  static int create_threads(unsigned nthreads, std::vector<std::string> hosts, int start_port);
   static void stop();
   static void enqueue_batch(char *buf, int len);
   static char* get_buffer();
@@ -51,7 +51,6 @@ class LogApply {
 
   struct LogBatch {
     uint64_t recv_thr_id;
-    uint64_t thread_id;
     uint64_t max_tid;
     bool needs_free;
     char *buf;
@@ -60,7 +59,7 @@ class LogApply {
   };
 
 public:
-  static int listen(unsigned nrecv_threads, unsigned napply_threads, int start_port);
+  static int listen(unsigned nthreads, int start_port);
   static void stop();
   static void cleanup(std::function<void()> callback);
 
@@ -79,7 +78,8 @@ private:
   static int advance();
   static void run_cleanup();
 
-  static volatile bool run;
+  static volatile bool run_apply;
+  static volatile bool run_advance;
 
   struct __attribute__((aligned(128))) RecvThread {
     int thread_id;

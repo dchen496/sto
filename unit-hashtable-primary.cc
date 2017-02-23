@@ -16,7 +16,7 @@ void test_simple_int(int batch) {
     usleep(startup_delay);
     Hashtable<int, int> f;
     Transaction::register_object(f, 0);
-    assert(Transaction::init_logging(1, 1, {host}, port) == 0);
+    assert(Transaction::init_logging(1, {host}, port) == 0);
 
     for (int i = 0; i < 20; i++) {
         int val = batch ? (i + 50) : i;

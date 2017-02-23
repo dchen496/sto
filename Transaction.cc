@@ -42,21 +42,18 @@ Transaction::~Transaction() {
             delete[] tset_[i];
 }
 
-int Transaction::init_logging(unsigned nsend_threads, unsigned nworker_threads, std::vector<std::string> hosts, int start_port) {
-   assert(nworker_threads <= MAX_THREADS);
-   assert(nsend_threads <= nworker_threads);
+int Transaction::init_logging(unsigned nthreads, std::vector<std::string> hosts, int start_port) {
+   assert(nthreads <= MAX_THREADS);
 
    log_enable = true;
 
-   assert(LogSend::create_threads(nsend_threads, nworker_threads, hosts, start_port) == 0);
+   assert(LogSend::create_threads(nthreads, hosts, start_port) == 0);
 
-   for (unsigned i = 0; i < nworker_threads; i++) {
+   for (unsigned i = 0; i < nthreads; i++) {
        threadinfo_t &thr = tinfo[i];
        thr.log_buf = new char[STO_LOG_BUF_SIZE];
        thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
        thr.log_stats = log_stats_t();
-        // allocate worker threads evenly to send threads
-       thr.log_send_thread = i % nsend_threads;
    }
 
    return 0;
@@ -248,6 +245,8 @@ after_unlock:
     state_ = s_aborted + committed;
 }
 
+#include "TBox.hh"
+
 void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
     threadinfo_t& thr = tinfo[TThread::id()];
 
@@ -287,14 +286,19 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
     thr.max_logged_tid = commit_tid();
 
     // write log entry to buffer
+
+    // TID
     *(tid_type *) ptr = commit_tid();
     if (debug_txn_log)
         std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << *(tid_type *) ptr << ' ' << std::dec;
     ptr += sizeof(tid_type);
+
+    // number of entries
     *(uint64_t *) ptr = nentries;
     if (debug_txn_log)
         std::cout << "N=" << *(uint64_t *) ptr << ' ';
     ptr += sizeof(uint64_t);
+
     for (unsigned* idxit = writeset; idxit < writeset + nwriteset; idxit++) {
         if (*idxit < tset_initial_capacity)
             it = &tset0_[*idxit];
@@ -303,11 +307,13 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
         if (!it->has_write()) // always false unless a user turns it off in install()/check()
             continue;
 
+        // object id
         *(uint64_t *) ptr = ptr_to_object_id[(void *) it->owner()];
         if(debug_txn_log)
             std::cout << "(" << std::hex << std::setw(2) << *(uint64_t *) ptr << " " << std::dec;
         ptr += sizeof(uint64_t);
 
+        // type specific
         int nb = it->owner()->write_log_entry(*it, ptr);
         if (debug_txn_log) {
             for (int i = 0; i < nb; i++) {
@@ -336,12 +342,14 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
 void Transaction::flush_log_batch() {
     threadinfo_t& thr = tinfo[TThread::id()];
 
-    assert(thr.log_buf_used < STO_LOG_BUF_SIZE);
+    assert(thr.log_buf_used <= STO_LOG_BUF_SIZE);
 
     uint64_t *log_buf = (uint64_t *) thr.log_buf;
-    log_buf[0] = TThread::id();
-    log_buf[1] = thr.log_buf_used;
-    log_buf[2] = thr.max_logged_tid;
+    log_buf[0] = thr.log_buf_used;
+    log_buf[1] = thr.max_logged_tid;
+
+    thr.log_stats.bytes += thr.log_buf_used;
+    thr.log_stats.bufs++;
 
     LogSend::enqueue_batch(thr.log_buf, thr.log_buf_used);
 
@@ -349,9 +357,6 @@ void Transaction::flush_log_batch() {
         std::cout << "Thread " << TThread::id() << " flushed " << thr.log_buf_used << " bytes\n";
     thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
     thr.log_buf = LogSend::get_buffer();
-
-    thr.log_stats.bytes += thr.log_buf_used;
-    thr.log_stats.bufs++;
 }
 
 void Transaction::update_synced_tid() {
