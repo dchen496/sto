@@ -13,14 +13,37 @@ int txnsize;
 std::string backup_host;
 int start_port;
 
+template <typename T>
 struct ThreadArgs {
     int id;
-    TBox<int64_t> *fs;
+    TBox<T> *fs;
     bool enable_logging;
 };
 
-void *test_multithreaded_int_worker(void *argptr) {
-    ThreadArgs &args = *(ThreadArgs *) argptr;
+template <int S>
+struct filler {
+    static_assert(S % sizeof(int) == 0, "S must be a multiple of the int size");
+
+    int buf[S / sizeof(int)];
+
+    filler() = default;
+    filler(const filler &f) = default;
+    filler &operator=(const filler &f) = default;
+
+    filler(int x) {
+        for (int i = 0; i < S / sizeof(int); i++) {
+            buf[i] = x;
+        }
+    }
+
+    friend std::ostream &operator<<(std::ostream &stream, const filler &f) {
+        return stream;
+    }
+};
+
+template <typename T>
+void *test_multithreaded_worker(void *argptr) {
+    ThreadArgs<T> &args = *(ThreadArgs<T> *) argptr;
     TThread::set_id(args.id);
 
     /*
@@ -31,7 +54,7 @@ void *test_multithreaded_int_worker(void *argptr) {
     sched_setaffinity(0, sizeof(cpuset), &cpuset);
     */
 
-    TBox<int64_t> *fs = args.fs;
+    TBox<T> *fs = args.fs;
     int val = 0;
     for (int i = 0; i < niters; i++) {
         TransactionGuard t;
@@ -45,16 +68,17 @@ void *test_multithreaded_int_worker(void *argptr) {
     return nullptr;
 }
 
-void test_multithreaded_int(bool enable_logging) {
+template <typename T>
+void test_multithreaded(bool enable_logging) {
     usleep(startup_delay);
-    std::vector<TBox<int64_t>> fs(nthreads * txnsize);
+    std::vector<TBox<T>> fs(nthreads * txnsize);
     for (unsigned i = 0; i < fs.size(); i++)
         Transaction::register_object(fs[i], i);
     if (enable_logging)
         assert(Transaction::init_logging(nthreads, {backup_host}, start_port) == 0);
 
     std::vector<pthread_t> thrs(nthreads);
-    std::vector<ThreadArgs> args(nthreads);
+    std::vector<ThreadArgs<T>> args(nthreads);
 
     using hc = std::chrono::high_resolution_clock;
 
@@ -62,7 +86,7 @@ void test_multithreaded_int(bool enable_logging) {
 
     for (int i = 0; i < nthreads; i++) {
         args[i] = { .id = i, .fs = fs.data(), .enable_logging = enable_logging };
-        pthread_create(&thrs[i], nullptr, test_multithreaded_int_worker, (void *) &args[i]);
+        pthread_create(&thrs[i], nullptr, &test_multithreaded_worker<T>, (void *) &args[i]);
     }
     for (int i = 0; i < nthreads; i++)
         pthread_join(thrs[i], nullptr);
@@ -111,7 +135,7 @@ int main(int argc, char **argv) {
 
     TThread::set_id(0);
     Transaction::debug_txn_log = false;
-    test_multithreaded_int(false);
-    test_multithreaded_int(true);
+    test_multithreaded<int64_t>(false);
+    test_multithreaded<int64_t>(true);
     return 0;
 }

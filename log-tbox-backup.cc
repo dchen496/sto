@@ -11,8 +11,9 @@ int txnsize;
 std::string listen_host;
 int start_port;
 
-void test_multithreaded_int() {
-    std::vector<TBox<int64_t>> fs(nthreads * txnsize);
+template <typename T>
+void test_multithreaded() {
+    std::vector<TBox<T>> fs(nthreads * txnsize);
     for (unsigned i = 0; i < fs.size(); i++)
         Transaction::register_object(fs[i], i);
     assert(LogApply::listen(nthreads, start_port) == 0);
@@ -36,6 +37,6 @@ int main(int argc, char **argv) {
     start_port = atoi(*arg++);
 
     LogApply::debug_txn_log = false;
-    test_multithreaded_int();
+    test_multithreaded<int64_t>();
     return 0;
 }
