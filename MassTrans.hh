@@ -13,6 +13,7 @@
 #include "StringWrapper.hh"
 #include "versioned_value.hh"
 #include "stuffed_str.hh"
+#include "Serializer.hh"
 
 #define RCU 1
 #define ABORT_ON_WRITE_READ_CONFLICT 0
@@ -23,11 +24,12 @@
 
 #include "Debug_rcu.hh"
 
-typedef stuffed_str<uint64_t> versioned_str;
+typedef stuffed_str<version_key_type> versioned_str;
 
 struct versioned_str_struct : public versioned_str {
   typedef Masstree::Str value_type;
-  typedef versioned_str::stuff_type version_type;
+  typedef versioned_str::stuff_type::version_type version_type;
+  typedef versioned_str::stuff_type::key_type key_type;
 
   bool needsResize(const value_type& v) {
     return needs_resize(v.length());
@@ -59,7 +61,11 @@ struct versioned_str_struct : public versioned_str {
   }
   
   inline version_type& version() {
-    return stuff();
+    return stuff().vers;
+  }
+
+  inline key_type& key() {
+    return stuff().key;
   }
 
   inline void deallocate_rcu(threadinfo& ti) {
@@ -253,7 +259,11 @@ private:
       return handlePutFound<INSERT, SET>(e, key, value);
     } else {
       //      auto p = ti.ti->allocate(sizeof(versioned_value), memtag_value);
-      versioned_value* val = (versioned_value*)versioned_value::make(value, invalid_bit);
+      char *keybuf = (char *) malloc(key.length());
+      memcpy(keybuf, key.data(), key.length());
+      version_key_type vk = { .vers = invalid_bit, .key = Str(keybuf, key.length()) };
+      versioned_value* val = (versioned_value*)versioned_value::make(value, vk);
+      val->key();
       lp.value() = val;
 #if ABORT_ON_WRITE_READ_CONFLICT
       auto orig_node = lp.node();
@@ -565,9 +575,56 @@ public:
     }
   }
 
+  enum class log_op {
+    UPDATE = 0,
+    INSERT,
+    DELETE
+  };
+
+  // format is:
+  // 1 byte: operation (upsert / delete)
+  // 8 bytes: key length
+  // variable length: key
+  // 8 bytes: value length
+  // variable length: value
+  int log_entry_size(TransItem &item) {
+    int ret = 0;
+    uint8_t op = 0;
+    ret += Serializer<uint8_t>::size(op);
+    auto e = item.key<versioned_value*>();
+    ret += Serializer<Str>::size(e->key());
+    ret += Serializer<V>::size(e->read_value());
+    return ret;
+  }
+
+  int write_log_entry(TransItem &item, char *buf) {
+    int ret = 0;
+    log_op op = log_op::UPDATE;
+    if (has_delete(item)) {
+      op = log_op::DELETE;
+    } else if (has_insert(item)) {
+      op = log_op::INSERT;
+    }
+    uint8_t op8 = (uint8_t) op;
+    ret += Serializer<uint8_t>::serialize(buf, op8);
+    auto e = item.key<versioned_value*>();
+    ret += Serializer<Str>::serialize(buf, e->key());
+    ret += Serializer<V>::serialize(buf, e->read_value());
+    return ret;
+  }
+
+  bool apply_log_entry(char *entry, TransactionTid::type log_tid, int &bytes_read) {
+    (void) entry, (void) log_tid;
+    bytes_read = 0;
+    return false;
+  }
+
   bool remove(const Str& key, threadinfo_type& ti = mythreadinfo) {
     cursor_type lp(table_, key);
     bool found = lp.find_locked(*ti.ti);
+    Str &val_key = lp.value()->key();
+    // XXX: clean this up
+    ti.ti->deallocate_rcu(val_key.mutable_data(), val_key.length(), memtag_value);
     lp.value()->deallocate_rcu(*ti.ti);
     lp.finish(found ? -1 : 0, *ti.ti);
     return found;

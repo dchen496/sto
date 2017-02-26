@@ -9,17 +9,30 @@
 // function (deallocate_rcu) in some other context.
 #include "kvthread.hh"
 
+struct version_key_type {
+  typedef uint64_t version_type;
+  typedef Masstree::Str key_type;
+
+  version_type vers;
+  key_type key;
+};
+
 template <typename T, typename=void>
 struct versioned_value_struct /*: public threadinfo::rcu_callback*/ {
   typedef T value_type;
   typedef TransactionTid::type version_type;
+  typedef Masstree::Str key_type;
 
   versioned_value_struct() : version_(), value_() {}
   // XXX Yihe: I made it public; is there any reason why it should be private?
-  versioned_value_struct(const value_type& val, version_type v) : version_(v), value_(val) {}
+  versioned_value_struct(const value_type& val, version_type v, key_type k) : version_(v), value_(val), key_(k) {}
   
-  static versioned_value_struct* make(const value_type& val, version_type version) {
-    return new versioned_value_struct<T>(val, version);
+  static versioned_value_struct* make(const value_type& val, version_type v) {
+    return new versioned_value_struct<T>(val, v, key_type());
+  }
+
+  static versioned_value_struct* make(const value_type& val, version_key_type vk) {
+    return new versioned_value_struct<T>(val, vk.vers, vk.key);
   }
   
   bool needsResize(const value_type&) {
@@ -49,6 +62,14 @@ struct versioned_value_struct /*: public threadinfo::rcu_callback*/ {
     return version_;
   }
 
+  inline const key_type& key() const {
+    return key_;
+  }
+
+  inline key_type& key() {
+    return key_;
+  }
+
   inline void deallocate_rcu(threadinfo& ti) {
     ti.deallocate_rcu(this, sizeof(versioned_value_struct), memtag_value);
   }
@@ -75,6 +96,7 @@ struct versioned_value_struct /*: public threadinfo::rcu_callback*/ {
 private: 
   version_type version_;
   value_type value_;
+  key_type key_;
 };
 
 // double box for non trivially copyable types!
@@ -83,12 +105,17 @@ struct versioned_value_struct<T, typename std::enable_if<!__has_trivial_copy(T)>
 public:
   typedef T value_type;
   typedef TransactionTid::type version_type;
+  typedef Masstree::Str key_type;
 
-  static versioned_value_struct* make(const value_type& val, version_type version) {
-    return new versioned_value_struct(val, version);
+  static versioned_value_struct* make(const value_type& val, version_type v) {
+    return new versioned_value_struct(val, v, key_type());
   }
 
-  versioned_value_struct() : version_(), valueptr_() {}
+  static versioned_value_struct* make(const value_type& val, version_key_type vk) {
+    return new versioned_value_struct(val, vk.vers, vk.key);
+  }
+
+  versioned_value_struct() : version_(), valueptr_(), key_() {}
 
   bool needsResize(const value_type&) {
     return false;
@@ -114,6 +141,14 @@ public:
     return version_;
   }
 
+  inline const key_type& key() const {
+    return key_;
+  }
+
+  inline key_type& key() {
+    return key_;
+  }
+
   inline void deallocate_rcu(threadinfo& ti) {
     // XXX: really this one needs to be a rcu_callback so we can call destructor
     ti.deallocate_rcu(this, sizeof(versioned_value_struct), memtag_value);
@@ -129,8 +164,9 @@ public:
   }
 
 private:
-  versioned_value_struct(const value_type& val, version_type version) : version_(version), valueptr_(new value_type(std::move(val))) {}
+  versioned_value_struct(const value_type& val, version_type version, key_type key) : version_(version), valueptr_(new value_type(std::move(val))), key_(key) {}
 
   version_type version_;
   value_type* valueptr_;
+  key_type key_;
 };
