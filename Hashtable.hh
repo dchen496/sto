@@ -106,15 +106,12 @@ public:
     Version_type buck_version = buck.version;
     fence();
     internal_elem *e = find(buck, k);
-    std::cout << "wtf" << std::endl;
     if (e) {
       auto item = t_read_only_item(e);
-      std::cout << "wtf2" << std::endl;
       if (!validity_check(item, e)) {
         Sto::abort();
         return false;
       }
-      std::cout << "wtf3" << std::endl;
 #if READ_MY_WRITES
       // deleted
       if (has_delete(item)) {
