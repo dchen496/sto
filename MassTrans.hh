@@ -259,9 +259,10 @@ private:
       return handlePutFound<INSERT, SET>(e, key, value);
     } else {
       //      auto p = ti.ti->allocate(sizeof(versioned_value), memtag_value);
-      char *keybuf = (char *) malloc(key.length());
+      /*char *keybuf = (char *) malloc(key.length());
       memcpy(keybuf, key.data(), key.length());
-      version_key_type vk = { .vers = invalid_bit, .key = Str(keybuf, key.length()) };
+      version_key_type vk = { .vers = invalid_bit, .key = Str(keybuf, key.length()) };*/
+      version_key_type vk = { .vers = invalid_bit, .key = Str() };
       versioned_value* val = (versioned_value*)versioned_value::make(value, vk);
       val->key();
       lp.value() = val;
@@ -614,17 +615,23 @@ public:
   }
 
   bool apply_log_entry(char *entry, TransactionTid::type log_tid, int &bytes_read) {
-    (void) entry, (void) log_tid;
-    bytes_read = 0;
+    uint8_t op8 = 0;
+    bytes_read += Serializer<uint8_t>::deserialize(entry, op8);
+
+    std::string key;
+    key.resize(Serializer<Str>::orig_size(entry));
+    Str keyStr(key);
+    bytes_read += Serializer<Str>::deserialize(entry, keyStr);
+
     return false;
   }
 
   bool remove(const Str& key, threadinfo_type& ti = mythreadinfo) {
     cursor_type lp(table_, key);
     bool found = lp.find_locked(*ti.ti);
-    Str &val_key = lp.value()->key();
+    /*Str &val_key = lp.value()->key();
     // XXX: clean this up
-    ti.ti->deallocate_rcu(val_key.mutable_data(), val_key.length(), memtag_value);
+    ti.ti->deallocate_rcu(val_key.mutable_data(), val_key.length(), memtag_value);*/
     lp.value()->deallocate_rcu(*ti.ti);
     lp.finish(found ? -1 : 0, *ti.ti);
     return found;
