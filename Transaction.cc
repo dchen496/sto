@@ -47,7 +47,9 @@ int Transaction::init_logging(unsigned nthreads, std::vector<std::string> hosts,
 
    log_enable = true;
 
-   assert(LogSend::create_threads(nthreads, hosts, start_port) == 0);
+   int ret = LogSend::create_threads(nthreads, hosts, start_port);
+   if (!ret)
+      assert(false);
 
    for (unsigned i = 0; i < nthreads; i++) {
        threadinfo_t &thr = tinfo[i];
@@ -206,7 +208,7 @@ void Transaction::stop(bool committed, unsigned* writeset, unsigned nwriteset) {
         }
 
         // log this transaction's writeset to the current thread's log buffer
-        if (any_writes_ && committed && log_enable)
+        if (log_enable && any_writes_ && committed)
            append_log_entry(writeset, nwriteset);
 
         for (unsigned* idxit = writeset + nwriteset; idxit != writeset; ) {

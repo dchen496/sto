@@ -16,6 +16,9 @@ public:
 template<typename T>
 class Serializer<T, true> {
 public:
+    static_assert(!std::is_same<T, std::string>::value, "bug");
+    static_assert(!std::is_same<T, lcdf::Str>::value, "bug");
+
     static int size(const T &obj) {
         (void) obj;
         return sizeof(T);
@@ -57,9 +60,9 @@ public:
 };
 
 template<>
-class Serializer<lcdf::Str, false> {
+class Serializer<lcdf::Str, true> {
 public:
-    static int size(const std::string &obj) {
+    static int size(const lcdf::Str &obj) {
         return sizeof(uint64_t) + obj.length();
     }
     static int serialize(char *buf, const lcdf::Str &src) {
