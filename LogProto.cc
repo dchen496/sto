@@ -150,8 +150,7 @@ void *LogSend::sender(void *argsptr) {
                 thr.batch_queue_cond.notify_all();
         }
         for (unsigned i = 0; i < thr.fds.size(); i++) {
-            // XXX: replace with a write_all function
-            if (write(thr.fds[i], batch.buf, batch.len) < batch.len) {
+            if (NetUtils::write_all(thr.fds[i], batch.buf, batch.len) < batch.len) {
                 perror("short write");
                 return nullptr;
             }
@@ -177,15 +176,11 @@ int LogApply::napply_threads;
 LogApply::ApplyThread LogApply::apply_threads[MAX_THREADS];
 
 pthread_t LogApply::advance_thread;
-Transaction::tid_type LogApply::min_received_tid = 0; // 0 is lower than any valid TID
-Transaction::tid_type LogApply::min_processed_tid = 0;
-Transaction::tid_type LogApply::min_cleaned_tid = 0;
+Transaction::tid_type LogApply::tid_bound = 0; // 0 is lower than any valid TID
 LogApply::ApplyState LogApply::apply_state = ApplyState::IDLE;
 
 int LogApply::listen(unsigned nthreads, int start_port, std::function<void()> apply_init_fn) {
-    min_received_tid = 0;
-    min_processed_tid = 0;
-    min_cleaned_tid = 0;
+    tid_bound = 0;
     apply_state = ApplyState::IDLE;
     fence();
 
@@ -385,7 +380,7 @@ void *LogApply::applier(void *argsptr) {
             break;
         case ApplyState::APPLY:
             {
-                uint64_t max_tid = min_received_tid;
+                uint64_t max_tid = tid_bound;
                 while (true) {
                     if (batches.empty()) {
                         std::unique_lock<std::mutex> lk(thr.mu);
@@ -427,7 +422,7 @@ void *LogApply::applier(void *argsptr) {
             break;
         case ApplyState::CLEAN:
             {
-                uint64_t max_tid = min_received_tid;
+                uint64_t max_tid = tid_bound;
                 run_cleanup();
                 release_fence();
                 thr.cleaned_tid = max_tid;
@@ -500,16 +495,16 @@ char *LogApply::process_txn(char *ptr) {
 int LogApply::advance() {
     assert(apply_state == ApplyState::IDLE);
     fence();
-    Transaction::tid_type new_valid = ~0ULL;
 
+    Transaction::tid_type min_received_tid = ~0ULL;
     for (int i = 0; i < napply_threads; i++)
-        new_valid = std::min(new_valid, apply_threads[i].received_tid);
+        min_received_tid = std::min(min_received_tid, apply_threads[i].received_tid);
     acquire_fence();
-    assert(new_valid >= min_received_tid);
-    if (new_valid == min_received_tid)
+    assert(min_received_tid >= tid_bound);
+    if (min_received_tid == tid_bound)
         return 0;
 
-    min_received_tid = new_valid;
+    tid_bound = min_received_tid;
     release_fence();
     apply_state = ApplyState::APPLY;
 
@@ -517,13 +512,13 @@ int LogApply::advance() {
     for (int i = 0; i < nrecv_threads; i++) {
         RecvThread &thr = recv_threads[i];
         int len = sizeof(uint64_t);
-        if (write(thr.sock_fd, &min_received_tid, len) < len) {
+        if (NetUtils::write_all(thr.sock_fd, &min_received_tid, len) < len) {
             perror("short write");
             return -1;
         }
     }
 
-    min_processed_tid = 0;
+    Transaction::tid_type min_processed_tid = 0;
     while (min_processed_tid < min_received_tid) {
         usleep(10); // should be significantly less than the sleep between advances
         min_processed_tid = ~0ULL;
@@ -535,7 +530,7 @@ int LogApply::advance() {
 
     release_fence();
     apply_state = ApplyState::CLEAN;
-    min_cleaned_tid = 0;
+    Transaction::tid_type min_cleaned_tid = 0;
     while (min_cleaned_tid < min_processed_tid) {
         usleep(10);
         min_cleaned_tid = ~0ULL;
@@ -571,7 +566,7 @@ void *LogApply::advancer(void *) {
         if (r < 0) {
             return nullptr;
         }
-        if (min_received_tid == ~0ULL) {
+        if (tid_bound == ~0ULL) {
             // no more transactions and we were told to exit
             // kill all the applier threads and exit
             release_fence();

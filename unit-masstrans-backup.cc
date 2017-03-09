@@ -27,7 +27,6 @@ void test_simple_int(int batch) {
 
     int v1 = -1, v2 = -1;
     bool found1 = false, found2 = false;
-    printf("here\n");
     fflush(stdout);
     {
         TransactionGuard t;
@@ -36,7 +35,6 @@ void test_simple_int(int batch) {
     }
     assert(!found1);
 
-    printf("here2\n");
     fflush(stdout);
     for (int i = 0; i < 19; i += 2) {
         {
@@ -48,7 +46,6 @@ void test_simple_int(int batch) {
         assert(v1 == batch ? (i + 51) : (i + 1));
     }
 
-    printf("here3\n");
     fflush(stdout);
     for (int i = 1; i < 19; i += 2) {
         TransactionGuard t;
@@ -118,7 +115,7 @@ void test_simple_string() {
 
 int main() {
     thread_init();
-//    LogApply::debug_txn_log = false;
+    LogApply::debug_txn_log = false;
     test_simple_int(0);
     test_simple_int(1);
     /*

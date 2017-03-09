@@ -114,8 +114,6 @@ private:
     KILL
   };
   static pthread_t advance_thread;
-  static Transaction::tid_type min_received_tid;
-  static Transaction::tid_type min_processed_tid;
-  static Transaction::tid_type min_cleaned_tid;
+  static Transaction::tid_type tid_bound;
   static ApplyState apply_state;
 };

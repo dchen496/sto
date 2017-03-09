@@ -206,7 +206,7 @@ void test_simple_string() {
 int main() {
     thread_init();
     TThread::set_id(0);
-    //Transaction::debug_txn_log = false;
+    Transaction::debug_txn_log = false;
     test_simple_int(0);
     //test_simple_int(1);
     /*
