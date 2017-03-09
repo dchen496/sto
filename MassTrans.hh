@@ -14,6 +14,7 @@
 #include "versioned_value.hh"
 #include "stuffed_str.hh"
 #include "Serializer.hh"
+#include "LogProto.hh"
 
 #define RCU 1
 #define ABORT_ON_WRITE_READ_CONFLICT 0
@@ -263,7 +264,6 @@ private:
       memcpy(keybuf, key.data(), key.length());
       version_key_type vk = { .vers = invalid_bit, .key = Str(keybuf, key.length()) };
       versioned_value* val = (versioned_value*)versioned_value::make(value, vk);
-      val->key();
       lp.value() = val;
 #if ABORT_ON_WRITE_READ_CONFLICT
       auto orig_node = lp.node();
@@ -548,7 +548,7 @@ public:
         write_value_type& v = item.template write_value<write_value_type>();
         e->set_value(v);
     }
-    if (Opacity)
+    if (Opacity || Transaction::log_enable)
       TransactionTid::set_version(e->version(), t.commit_tid());
     else if (has_insert(item)) {
       Version v = e->version() & ~invalid_bit;
@@ -593,13 +593,13 @@ public:
     ret += Serializer<uint8_t>::size(op);
     auto e = item.key<versioned_value*>();
     ret += Serializer<Str>::size(e->key());
-    ret += Serializer<V>::size(e->read_value());
-    printf("%d %d\n", Serializer<Str>::size(e->key()), Serializer<V>::size(e->read_value()));
+    if (!has_delete(item)) {
+      ret += Serializer<V>::size(e->read_value());
+    }
     return ret;
   }
 
   int write_log_entry(TransItem &item, char *buf) {
-    int ret = 0;
     log_op op = log_op::UPDATE;
     if (has_delete(item)) {
       op = log_op::DELETE;
@@ -607,32 +607,147 @@ public:
       op = log_op::INSERT;
     }
     uint8_t op8 = (uint8_t) op;
-    ret += Serializer<uint8_t>::serialize(buf, op8);
+    char *ptr = buf;
+    ptr += Serializer<uint8_t>::serialize(ptr, op8);
     auto e = item.key<versioned_value*>();
-    ret += Serializer<Str>::serialize(buf, e->key());
-    ret += Serializer<V>::serialize(buf, e->read_value());
-    return ret;
+    ptr += Serializer<Str>::serialize(ptr, e->key());
+    if (op != log_op::DELETE) {
+      ptr += Serializer<V>::serialize(ptr, e->read_value());
+    }
+    return ptr - buf;
   }
 
   bool apply_log_entry(char *entry, TransactionTid::type log_tid, int &bytes_read) {
+    threadinfo_type& ti = mythreadinfo;
+    char *ptr = entry;
+
     uint8_t op8 = 0;
-    bytes_read += Serializer<uint8_t>::deserialize(entry, op8);
+    ptr += Serializer<uint8_t>::deserialize(ptr, op8);
+    log_op op = (log_op) op8;
+    assert(op == log_op::UPDATE || op == log_op::INSERT || op == log_op::DELETE);
 
-    std::string key;
-    key.resize(Serializer<Str>::orig_size(entry));
-    Str keyStr(key);
-    bytes_read += Serializer<Str>::deserialize(entry, keyStr);
+    Str key;
+    ptr += Serializer<Str>::deserialize(ptr, key);
 
-    return false;
+    V value;
+    if (op != log_op::DELETE) {
+      ptr += Serializer<V>::deserialize(ptr, value);
+    }
+
+    bytes_read = ptr - entry;
+
+    if (op == log_op::DELETE) {
+      cursor_type lp(table_, key);
+      bool found = lp.find_insert(*ti.ti);
+      if (found) {
+        versioned_value *val = lp.value();
+        bool do_update = TransactionTid::lock_if_older(val->version(), log_tid);
+        if (do_update) {
+          assert(!(val->version() & resized_bit)); // should never happen since we used a locked cursor
+          TransactionTid::set_version(val->version(), log_tid | invalid_bit);
+          Str key_copy = val->key();
+          LogApply::cleanup([=](){ remove_key_if_invalid(key_copy); });
+          unlock(val);
+        }
+        lp.finish(0, *ti.ti);
+        return do_update;
+      }
+
+      // do a dummy insert, marked as invalid, and schedule cleanup for later
+      // this prevents races from reordering inserts and deletes
+      char *keybuf = (char *) malloc(key.length());
+      memcpy(keybuf, key.data(), key.length());
+      version_key_type vk = { .vers = log_tid | invalid_bit, .key = Str(keybuf, key.length()) };
+      V dummy = V();
+      versioned_value *val = versioned_value::make(std::move(dummy), vk);
+      lp.value() = val;
+      Str key_copy = val->key();
+      LogApply::cleanup([=](){ remove_key_if_invalid(key_copy); });
+      lp.finish(1, *ti.ti);
+      return true;
+    }
+
+    // try updates without holding locks first
+    if (op == log_op::UPDATE) {
+      unlocked_cursor_type lp(table_, key);
+      while (true) {
+        if (!lp.find_unlocked(*ti.ti)) {
+          break;
+        }
+        versioned_value *val = lp.value();
+        bool do_update = TransactionTid::lock_if_older(val->version(), log_tid);
+        if (do_update) {
+          // the value box may have been resized since we weren't holding tree locks
+          if (val->version() & resized_bit) {
+            continue; // retry (is there a better way of doing this by just rereading the leaf?)
+          }
+          TransactionTid::set_version(val->version(), log_tid);
+          val->set_value(value);
+          unlock(val);
+        }
+        return do_update;
+      }
+    }
+
+    // insert / fallback for update
+    cursor_type lp(table_, key);
+    bool found = lp.find_insert(*ti.ti);
+    if (found) {
+      versioned_value *val = lp.value();
+      bool do_update = TransactionTid::lock_if_older(val->version(), log_tid);
+      if (do_update) {
+        assert(!(val->version() & resized_bit));
+        bool needsResize = val->needsResize(value);
+        if (needsResize) {
+          versioned_value *new_val = val->resizeIfNeeded(value);
+          assert(new_val != val); // should always realloc
+          TransactionTid::set_version(new_val->version(), log_tid); // also locks the new value
+          new_val->set_value(value);
+          lp.value() = new_val;
+          unlock(new_val);
+
+          // force updates that didn't lock tree nodes and now see a stale value to retry
+          TransactionTid::set_version(val->version(), log_tid | resized_bit);
+          unlock(val);
+          val->deallocate_rcu(*ti.ti);
+        } else {
+          TransactionTid::set_version(val->version(), log_tid);
+          val->set_value(value);
+          unlock(val);
+        }
+      }
+      lp.finish(0, *ti.ti);
+      return do_update;
+    }
+
+    char *keybuf = (char *) malloc(key.length());
+    memcpy(keybuf, key.data(), key.length());
+    version_key_type vk = { .vers = log_tid, .key = Str(keybuf, key.length()) };
+    versioned_value *val = versioned_value::make(std::move(value), vk);
+    lp.value() = val;
+    lp.finish(1, *ti.ti);
+    return true;
+  }
+
+  void remove_key_if_invalid(Str key) {
+    threadinfo_type& ti = mythreadinfo;
+    cursor_type lp(table_, key);
+    bool found = lp.find_locked(*ti.ti);
+    if (found && (lp.value()->version() & invalid_bit)) {
+      ti.ti->deallocate_rcu(key.mutable_data(), key.length(), memtag_value);
+      lp.value()->deallocate_rcu(*ti.ti);
+    }
+    lp.finish(found ? -1 : 0, *ti.ti);
   }
 
   bool remove(const Str& key, threadinfo_type& ti = mythreadinfo) {
     cursor_type lp(table_, key);
     bool found = lp.find_locked(*ti.ti);
-    Str &val_key = lp.value()->key();
-    // XXX: clean this up
-    ti.ti->deallocate_rcu(val_key.mutable_data(), val_key.length(), memtag_value);
-    lp.value()->deallocate_rcu(*ti.ti);
+    if (found) {
+      Str &val_key = lp.value()->key();
+      ti.ti->deallocate_rcu(val_key.mutable_data(), val_key.length(), memtag_value);
+      lp.value()->deallocate_rcu(*ti.ti);
+    }
     lp.finish(found ? -1 : 0, *ti.ti);
     return found;
   }
@@ -780,6 +895,7 @@ protected:
   }
 
   static constexpr Version invalid_bit = TransactionTid::user_bit;
+  static constexpr Version resized_bit = TransactionTid::user_bit << 1; // used during log apply only
 
   static constexpr uintptr_t internode_bit = 1<<0;
 

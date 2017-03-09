@@ -73,10 +73,11 @@ public:
     static int orig_size(const char *buf) {
         return *(uint64_t *) buf;
     }
+    // returns a reference to the buffer!
     static int deserialize(const char *buf, lcdf::Str &dst) {
         uint64_t len = *(uint64_t *) buf;
         buf += sizeof(uint64_t);
-        memcpy(dst.mutable_data(), buf, len);
+        dst.assign(buf, len);
         return size(dst);
     }
 };

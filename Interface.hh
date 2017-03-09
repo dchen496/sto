@@ -107,7 +107,7 @@ public:
     static bool lock_if_older(type& oldv, type newv, int here) {
         while (true) {
             type vv = oldv;
-            if (vv >= newv)
+            if ((newv & ~(increment_value - 1)) <= (vv & ~(increment_value - 1)))
                 return false;
             if (bool_cmpxchg(&oldv, vv & ~lock_bit, vv | lock_bit | here))
                 break;
