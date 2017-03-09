@@ -59,7 +59,7 @@ class LogApply {
   };
 
 public:
-  static int listen(unsigned nthreads, int start_port);
+  static int listen(unsigned nthreads, int start_port, std::function<void()> apply_init_fn = []{});
   static void stop();
   static void cleanup(std::function<void()> callback);
 
@@ -71,15 +71,12 @@ private:
   static bool read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatch &batch);
 
   static void *applier(void *argsptr);
-  static char *process_batch_part(LogBatch &batch, uint64_t max_tid);
+  static bool process_batch_part(LogBatch &batch, uint64_t max_tid);
   static char *process_txn(char *ptr);
 
   static void *advancer(void *argsptr);
   static int advance();
   static void run_cleanup();
-
-  static volatile bool run_apply;
-  static volatile bool run_advance;
 
   struct __attribute__((aligned(128))) RecvThread {
     int thread_id;
@@ -96,18 +93,29 @@ private:
   struct __attribute__((aligned(128))) ApplyThread {
     int thread_id;
     pthread_t handle;
+    std::function<void()> init_fn;
 
     std::mutex mu;
     std::queue<LogBatch> batch_queue;
     std::condition_variable batch_queue_cond;
     Transaction::tid_type received_tid;
     Transaction::tid_type processed_tid;
+    Transaction::tid_type cleaned_tid;
     std::vector<std::function<void()>> cleanup_callbacks;
   };
 
   static int napply_threads;
   static ApplyThread apply_threads[MAX_THREADS];
 
+  enum ApplyState {
+    IDLE = 0,
+    APPLY,
+    CLEAN,
+    KILL
+  };
   static pthread_t advance_thread;
   static Transaction::tid_type min_received_tid;
+  static Transaction::tid_type min_processed_tid;
+  static Transaction::tid_type min_cleaned_tid;
+  static ApplyState apply_state;
 };

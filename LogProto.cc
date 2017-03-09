@@ -167,9 +167,6 @@ void *LogSend::sender(void *argsptr) {
 }
 
 
-volatile bool LogApply::run_apply;
-volatile bool LogApply::run_advance;
-
 bool LogApply::debug_txn_log = STO_DEBUG_TXN_LOG;
 uint64_t LogApply::txns_processed[MAX_THREADS];
 
@@ -181,11 +178,15 @@ LogApply::ApplyThread LogApply::apply_threads[MAX_THREADS];
 
 pthread_t LogApply::advance_thread;
 Transaction::tid_type LogApply::min_received_tid = 0; // 0 is lower than any valid TID
+Transaction::tid_type LogApply::min_processed_tid = 0;
+Transaction::tid_type LogApply::min_cleaned_tid = 0;
+LogApply::ApplyState LogApply::apply_state = ApplyState::IDLE;
 
-int LogApply::listen(unsigned nthreads, int start_port) {
-    run_advance = true;
-    run_apply = true;
+int LogApply::listen(unsigned nthreads, int start_port, std::function<void()> apply_init_fn) {
     min_received_tid = 0;
+    min_processed_tid = 0;
+    min_cleaned_tid = 0;
+    apply_state = ApplyState::IDLE;
     fence();
 
     nrecv_threads = nthreads;
@@ -222,8 +223,10 @@ int LogApply::listen(unsigned nthreads, int start_port) {
     for (int i = 0; i < napply_threads; i++) {
         ApplyThread &thr = apply_threads[i];
         thr.thread_id = i;
+        thr.init_fn = apply_init_fn;
         thr.received_tid = 0;
         thr.processed_tid = 0;
+        thr.cleaned_tid = 0;
         txns_processed[i] = 0;
         pthread_create(&thr.handle, nullptr, &applier, (void *) &thr);
     }
@@ -233,18 +236,9 @@ int LogApply::listen(unsigned nthreads, int start_port) {
     for (int i = 0; i < nrecv_threads; i++)
         pthread_join(recv_threads[i].handle, nullptr);
 
-    run_apply = false;
-    for (int i = 0; i < napply_threads; i++)
-        apply_threads[i].batch_queue_cond.notify_all();
-
+    pthread_join(advance_thread, nullptr);
     for (int i = 0; i < napply_threads; i++)
         pthread_join(apply_threads[i].handle, nullptr);
-
-    run_advance = false;
-    fence();
-
-    pthread_join(advance_thread, nullptr);
-    advance();
 
     // at this point, everyone is done sending
     for (int i = 0; i < nrecv_threads; i++) {
@@ -258,6 +252,7 @@ int LogApply::listen(unsigned nthreads, int start_port) {
 }
 
 void LogApply::stop() {
+    // TODO ?
 }
 
 void *LogApply::receiver(void* argsptr) {
@@ -290,8 +285,10 @@ void *LogApply::receiver(void* argsptr) {
             std::unique_lock<std::mutex> lk(athr.mu);
 
             // batches are sent in order to the apply thread
+            release_fence();
             assert(athr.received_tid <= batch.max_tid);
             athr.received_tid = batch.max_tid;
+
             batch.recv_thr_id = thr.thread_id;
 
             // don't accumulate more than 1 buffer per thread
@@ -309,6 +306,7 @@ void *LogApply::receiver(void* argsptr) {
         ApplyThread &athr = apply_threads[thr.thread_id];
         std::unique_lock<std::mutex> lk(athr.mu);
         athr.received_tid = ~0ULL;
+        athr.batch_queue_cond.notify_all();
     }
 
     return nullptr;
@@ -359,61 +357,103 @@ bool LogApply::read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatc
     batch.max_tid = received_tid;
     batch.start = batch.buf + STO_LOG_BATCH_HEADER_SIZE;
     batch.end = batch.buf + len;
+    if (debug_txn_log) {
+        std::cout << "Thread " << TThread::id() << " received " << len << " bytes\n";
+    }
     return true;
 }
 
 void *LogApply::applier(void *argsptr) {
     ApplyThread &thr = *(ApplyThread *) argsptr;
     TThread::set_id(thr.thread_id);
+    thr.init_fn();
 
     std::queue<LogBatch> batches;
 
-    int i = 0;
-    while (true) {
-        if (batches.empty()) {
-            std::unique_lock<std::mutex> lk(thr.mu);
-            while (run_apply && thr.batch_queue.empty())
-                thr.batch_queue_cond.wait(lk);
-            if (!run_apply && thr.batch_queue.empty())
-                break;
-            i++;
-            batches.push(std::move(thr.batch_queue.front()));
-            thr.batch_queue.pop();
-            thr.batch_queue_cond.notify_all();
-        }
-
-        uint64_t max_tid = min_received_tid;
+    bool running = true;
+    while (running) {
+        ApplyState state = apply_state;
         acquire_fence();
-
-        LogBatch &batch = batches.front();
-        if (batch.max_tid <= max_tid) {
-            batch.start = process_batch_part(batch, max_tid);
-            if (batch.start >= batch.end) {
-                if (batch.needs_free) {
-                    delete[] batch.buf;
-                } else {
-                    RecvThread &rthr = recv_threads[batch.recv_thr_id];
-                    std::unique_lock<std::mutex> lk(rthr.mu);
-                    rthr.free_queue.push(batch);
-                }
-                batches.pop();
+        switch (state) {
+        case ApplyState::IDLE:
+            // TODO: process some read only transactions
+            // just waste time for now
+            while (apply_state == ApplyState::IDLE) {
+                usleep(10);
+                fence();
             }
-        } else {
-            usleep(10);
+            break;
+        case ApplyState::APPLY:
+            {
+                uint64_t max_tid = min_received_tid;
+                while (true) {
+                    if (batches.empty()) {
+                        std::unique_lock<std::mutex> lk(thr.mu);
+                        while (thr.batch_queue.empty() && thr.received_tid != ~0ULL)
+                            thr.batch_queue_cond.wait(lk);
+                        while (!thr.batch_queue.empty()) {
+                            batches.push(std::move(thr.batch_queue.front()));
+                            thr.batch_queue.pop();
+                        }
+                        thr.batch_queue_cond.notify_all();
+                    }
+
+                    if (batches.empty() && thr.received_tid == ~0ULL)
+                        break;
+
+                    LogBatch &batch = batches.front();
+                    if (!process_batch_part(batch, max_tid))
+                        break;
+                    if (batch.start >= batch.end) {
+                        if (batch.needs_free) {
+                            delete[] batch.buf;
+                        } else {
+                            RecvThread &rthr = recv_threads[batch.recv_thr_id];
+                            std::unique_lock<std::mutex> lk(rthr.mu);
+                            rthr.free_queue.push(batch);
+                        }
+                        batches.pop();
+                    }
+                }
+
+                release_fence();
+                thr.processed_tid = max_tid;
+
+                while (apply_state == ApplyState::APPLY) {
+                    usleep(10);
+                    fence();
+                }
+            }
+            break;
+        case ApplyState::CLEAN:
+            {
+                uint64_t max_tid = min_received_tid;
+                run_cleanup();
+                release_fence();
+                thr.cleaned_tid = max_tid;
+                while (apply_state == ApplyState::CLEAN) {
+                    usleep(10);
+                    fence();
+                }
+            }
+            break;
+        case ApplyState::KILL:
+            running = false;
+            break;
         }
     }
 
     return nullptr;
 }
 
-char *LogApply::process_batch_part(LogBatch &batch, uint64_t max_tid) {
+bool LogApply::process_batch_part(LogBatch &batch, uint64_t max_tid) {
     while (batch.start < batch.end) {
         uint64_t tid = ((uint64_t *) batch.start)[0];
         if (tid > max_tid)
-            break;
+            return false;
         batch.start = process_txn(batch.start);
     }
-    return batch.start;
+    return true;
 }
 
 char *LogApply::process_txn(char *ptr) {
@@ -423,7 +463,6 @@ char *LogApply::process_txn(char *ptr) {
     Transaction::tid_type tid;
     ptr += Serializer<Transaction::tid_type>::deserialize(ptr, tid);
     assert(tid > thr.processed_tid);
-    thr.processed_tid = tid;
 
     uint64_t nentries;
     ptr += Serializer<uint64_t>::deserialize(ptr, nentries);
@@ -442,7 +481,7 @@ char *LogApply::process_txn(char *ptr) {
         obj.apply_log_entry(ptr, tid, bytes_read);
 
         if (debug_txn_log) {
-            std::cout << "(" << std::hex << std::setw(2) << object_id << " ";
+            std::cout << std::dec << bytes_read << ":(" << std::hex << std::setw(2) << object_id << " ";
             for (int i = 0; i < bytes_read; i++) {
                 std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) (unsigned char) ptr[i];
             }
@@ -453,20 +492,28 @@ char *LogApply::process_txn(char *ptr) {
     if (debug_txn_log)
         std::cout << '\n';
 
+    release_fence();
+    thr.processed_tid = tid;
     return ptr;
 }
 
 int LogApply::advance() {
+    assert(apply_state == ApplyState::IDLE);
     fence();
     Transaction::tid_type new_valid = ~0ULL;
-    for (int i = 0; i < napply_threads; i++) {
-        ApplyThread &thr = apply_threads[i];
-        std::unique_lock<std::mutex> lk(thr.mu);
-        new_valid = std::min(new_valid, thr.received_tid);
-    }
+
+    for (int i = 0; i < napply_threads; i++)
+        new_valid = std::min(new_valid, apply_threads[i].received_tid);
+    acquire_fence();
+    assert(new_valid >= min_received_tid);
+    if (new_valid == min_received_tid)
+        return 0;
+
     min_received_tid = new_valid;
     release_fence();
+    apply_state = ApplyState::APPLY;
 
+    // send ack to primary
     for (int i = 0; i < nrecv_threads; i++) {
         RecvThread &thr = recv_threads[i];
         int len = sizeof(uint64_t);
@@ -475,12 +522,37 @@ int LogApply::advance() {
             return -1;
         }
     }
+
+    min_processed_tid = 0;
+    while (min_processed_tid < min_received_tid) {
+        usleep(10); // should be significantly less than the sleep between advances
+        min_processed_tid = ~0ULL;
+        for (int i = 0; i < napply_threads; i++)
+            min_processed_tid = std::min(min_processed_tid, apply_threads[i].processed_tid);
+        acquire_fence();
+    }
+    assert(min_processed_tid == min_received_tid);
+
+    release_fence();
+    apply_state = ApplyState::CLEAN;
+    min_cleaned_tid = 0;
+    while (min_cleaned_tid < min_processed_tid) {
+        usleep(10);
+        min_cleaned_tid = ~0ULL;
+        for (int i = 0; i < napply_threads; i++)
+            min_cleaned_tid = std::min(min_cleaned_tid, apply_threads[i].cleaned_tid);
+        acquire_fence();
+    }
+    assert(min_cleaned_tid == min_processed_tid);
+
+    release_fence();
+    apply_state = ApplyState::IDLE;
     return 0;
 }
 
 void *LogApply::advancer(void *) {
     // spin until all sockets are connected
-    while (run_advance) {
+    while (true) {
         bool wait = false;
         for (int i = 0; i < nrecv_threads; i++) {
             if (recv_threads[i].sock_fd < 0)
@@ -494,9 +566,18 @@ void *LogApply::advancer(void *) {
 
     // terminates when the primary disconnects, and all
     // of the apply threads are finished
-    while (run_advance) {
-        if (advance() < 0)
+    while (true) {
+        int r = advance();
+        if (r < 0) {
             return nullptr;
+        }
+        if (min_received_tid == ~0ULL) {
+            // no more transactions and we were told to exit
+            // kill all the applier threads and exit
+            release_fence();
+            apply_state = ApplyState::KILL;
+            return nullptr;
+        }
         usleep(50000);
     }
     return nullptr;
@@ -504,12 +585,8 @@ void *LogApply::advancer(void *) {
 
 void LogApply::run_cleanup() {
     ApplyThread &thr = apply_threads[TThread::id()];
-    while (thr.cleanup_callbacks.size() > 0) {
-        std::vector<std::function<void()>> callbacks = thr.cleanup_callbacks;
-        thr.cleanup_callbacks.clear();
-        for (std::function<void()> callback : callbacks)
-            callback();
-    }
+    for (std::function<void()> callback : thr.cleanup_callbacks)
+        callback();
 }
 
 void LogApply::cleanup(std::function<void()> callback) {

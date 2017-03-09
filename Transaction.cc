@@ -47,9 +47,8 @@ int Transaction::init_logging(unsigned nthreads, std::vector<std::string> hosts,
 
    log_enable = true;
 
-   int ret = LogSend::create_threads(nthreads, hosts, start_port);
-   if (!ret)
-      assert(false);
+   if (LogSend::create_threads(nthreads, hosts, start_port))
+      return -1;
 
    for (unsigned i = 0; i < nthreads; i++) {
        threadinfo_t &thr = tinfo[i];
@@ -310,14 +309,13 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
             continue;
 
         // object id
-        *(uint64_t *) ptr = ptr_to_object_id[(void *) it->owner()];
-        if(debug_txn_log)
-            std::cout << "(" << std::hex << std::setw(2) << *(uint64_t *) ptr << " " << std::dec;
+        uint64_t obj_id = ptr_to_object_id[(void *) it->owner()];
+        *(uint64_t *) ptr = obj_id;
         ptr += sizeof(uint64_t);
-
-        // type specific
         int nb = it->owner()->write_log_entry(*it, ptr);
-        if (debug_txn_log) {
+
+        if(debug_txn_log) {
+            std::cout << nb << ":(" << std::hex << std::setw(2) << obj_id << " " << std::dec;
             for (int i = 0; i < nb; i++) {
                 std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) (unsigned char) ptr[i] << std::dec;
             }
@@ -327,7 +325,6 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
     }
     if (debug_txn_log)
         std::cout << '\n';
-
 
     uint64_t new_used = ptr - thr.log_buf;
     assert(new_used == thr.log_buf_used + size);
