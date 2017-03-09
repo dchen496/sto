@@ -3,7 +3,7 @@
 #include <cassert>
 #include <vector>
 #include "Transaction.hh"
-#include "Hashtable.hh"
+#include "MassTrans.hh"
 
 #define GUARDED if (TransactionGuard tguard{})
 
@@ -12,27 +12,44 @@ const int port = 2000;
 const int niters = 2000000;
 const int startup_delay = 500000;
 
+void thread_init() {
+    MassTrans<int>::thread_init();
+}
+
+template <typename T>
+std::string to_str(T v) {
+    std::stringstream ss;
+    ss << v;
+    return ss.str();
+}
+
 void test_simple_int(int batch) {
     usleep(startup_delay);
-    Hashtable<int, int> f;
+    MassTrans<int> f;
     Transaction::register_object(f, 0);
     assert(Transaction::init_logging(1, {host}, port) == 0);
 
+    // inserts
     for (int i = 0; i < 20; i++) {
         int val = batch ? (i + 50) : i;
         {
             TransactionGuard t;
-            f.transInsert(i, val + 1);
+            std::string key = to_str<int>(i);
+            f.transInsert(key, val + 1);
         }
         if (!batch)
             Transaction::flush_log_batch();
     }
+
+    // get and update
     for (int i = 1; i < 20; i += 2) {
         {
             TransactionGuard t;
             int v = 0;
-            assert(f.transGet(i - 1, v));
-            f.transUpdate(i, v * 2);
+            std::string key1 = to_str<int>(i - 1);
+            std::string key2 = to_str<int>(i);
+            assert(f.transGet(key1, v));
+            f.transUpdate(key2, v * 2);
         }
         if (!batch)
             Transaction::flush_log_batch();
@@ -40,7 +57,8 @@ void test_simple_int(int batch) {
 
     {
         TransactionGuard t;
-        f.transDelete(19);
+        std::string key1 = to_str<int>(19);
+        f.transDelete(key1);
     }
     Transaction::flush_log_batch();
     Transaction::stop_logging();
@@ -186,10 +204,11 @@ void test_simple_string() {
 */
 
 int main() {
+    thread_init();
     TThread::set_id(0);
-    Transaction::debug_txn_log = false;
+    //Transaction::debug_txn_log = false;
     test_simple_int(0);
-    test_simple_int(1);
+    //test_simple_int(1);
     /*
     test_many_writes(0);
     test_many_writes(1);

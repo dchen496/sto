@@ -1,0 +1,13 @@
+#!/bin/bash
+
+BOLD=$'\e[1m'
+RESET=$'\e[0m'
+GREEN=$'\e[32m'
+RED=$'\e[31m'
+
+(./unit-masstrans-backup 2>&1 | sed -u -e "s/^/$BOLD$RED[B]$RESET /") &
+./unit-masstrans-primary 2>&1 | sed -u -e "s/^/$BOLD$GREEN[P]$RESET /"
+
+sleep 1
+
+killall unit-masstrans-backup
