@@ -122,7 +122,7 @@ void test_multithreaded(bool enable_logging) {
 
 int main(int argc, char **argv) {
     if (argc != 6) {
-        printf("usage: log-tbox-primary nthreads niters txnsize backup_host start_port");
+        printf("usage: log-tbox-primary nthreads niters txnsize backup_host start_port\n");
         return -1;
     }
 
