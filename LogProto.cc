@@ -290,8 +290,10 @@ void *LogApply::receiver(void* argsptr) {
             // don't accumulate more than a fixed number of buffers per thread
             // waiting here creates back-pressure on the sender
             // XXX: is this the right number?
+            /*
             while (athr.batch_queue.size() >= 100)
                 athr.batch_queue_cond.wait(lk);
+            */
 
             athr.batch_queue.push(batch);
             athr.batch_queue_cond.notify_all();
@@ -310,14 +312,16 @@ void *LogApply::receiver(void* argsptr) {
 
 /*
     Log batch format:
-    - Thread ID (8 bytes)
+    Header
+    - Note that variable length ints are NOT used here
     - Length of batch (8 bytes)
     - Batch TID (8 bytes)
         - If this batch and all previous batches are applied, the database
           state will reflect at least this TID
-    - For each transaction:
-        - Transaction ID (8 bytes)
-        - Number of entries/writes (8 bytes)
+
+    For each transaction:
+        - Transaction ID (variable length int, 1-9 bytes)
+        - Number of entries/writes (variable length int, 1-9 bytes)
         - List of entries (type specific format)
 */
 bool LogApply::read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatch &batch) {
@@ -337,12 +341,12 @@ bool LogApply::read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatc
     if (n <= 0)
         return false;
 
-    uint64_t len;
-    ptr += Serializer<uint64_t>::deserialize(ptr, len);
+    uint64_t len = *(uint64_t *) ptr;
+    ptr += sizeof(uint64_t);
     assert(len <= STO_LOG_BUF_SIZE);
 
-    uint64_t received_tid;
-    ptr += Serializer<uint64_t>::deserialize(ptr, received_tid);
+    uint64_t received_tid = *(uint64_t *) ptr;
+    ptr += sizeof(uint64_t);
 
     if (len > STO_LOG_BATCH_HEADER_SIZE) {
         n = NetUtils::read_all(sock_fd, ptr, len - STO_LOG_BATCH_HEADER_SIZE);
@@ -429,7 +433,8 @@ void *LogApply::applier(void *argsptr) {
 
 bool LogApply::process_batch_part(LogBatch &batch, uint64_t max_tid) {
     while (batch.start < batch.end) {
-        uint64_t tid = ((uint64_t *) batch.start)[0];
+        uint64_t tid;
+        Serializer<uint64_t>::deserialize(batch.start, tid);
         if (tid > max_tid)
             return false;
         batch.start = process_txn(batch.start);
@@ -443,7 +448,6 @@ char *LogApply::process_txn(char *ptr) {
 
     Transaction::tid_type tid;
     ptr += Serializer<Transaction::tid_type>::deserialize(ptr, tid);
-    assert(tid > thr.processed_tid);
 
     uint64_t nentries;
     ptr += Serializer<uint64_t>::deserialize(ptr, nentries);
@@ -452,6 +456,8 @@ char *LogApply::process_txn(char *ptr) {
         std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << tid << ' ';
         std::cout << "N=" << nentries << ' ';
     }
+
+    assert(tid > thr.processed_tid);
 
     for (uint64_t i = 0; i < nentries; i++) {
         uint64_t object_id;

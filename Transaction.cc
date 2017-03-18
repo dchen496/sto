@@ -1,5 +1,6 @@
 #include "Transaction.hh"
 #include "LogProto.hh"
+#include "Serializer.hh"
 #include <typeinfo>
 
 Transaction::testing_type Transaction::testing;
@@ -246,8 +247,6 @@ after_unlock:
     state_ = s_aborted + committed;
 }
 
-#include "TBox.hh"
-
 void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
     threadinfo_t& thr = tinfo[TThread::id()];
 
@@ -257,9 +256,10 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
         assert(false);
     }
 
+    tid_type tid = commit_tid();
 
     // compute log entry size first
-    uint64_t size = sizeof(tid_type) + sizeof(uint64_t); // TID and number of entries
+    uint64_t size = Serializer<tid_type>::size(tid);
     uint64_t nentries = 0;
     TransItem* it;
     for (unsigned* idxit = writeset; idxit < writeset + nwriteset; idxit++) {
@@ -271,8 +271,12 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
             continue;
 
         nentries++;
-        size += sizeof(uint64_t) + it->owner()->log_entry_size(*it);
+        // TODO: this extra lookup is inefficient
+        uint64_t obj_id = ptr_to_object_id[(void *) it->owner()];
+        size += Serializer<uint64_t>::size(obj_id);
+        size += it->owner()->log_entry_size(*it);
     }
+    size += Serializer<uint64_t>::size(nentries);
 
     // Reserve space in buffer, and flush it if it's full.
     // The log batch is flushed BEFORE updating max_logged_tid since
@@ -284,21 +288,19 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
     assert(thr.log_buf_used + size <= STO_LOG_BUF_SIZE);
     char *ptr = thr.log_buf + thr.log_buf_used;
 
-    thr.max_logged_tid = commit_tid();
+    thr.max_logged_tid = tid;
 
     // write log entry to buffer
 
     // TID
-    *(tid_type *) ptr = commit_tid();
     if (debug_txn_log)
-        std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << *(tid_type *) ptr << ' ' << std::dec;
-    ptr += sizeof(tid_type);
+        std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << tid << ' ' << std::dec;
+    ptr += Serializer<tid_type>::serialize(ptr, tid);
 
     // number of entries
-    *(uint64_t *) ptr = nentries;
     if (debug_txn_log)
-        std::cout << "N=" << *(uint64_t *) ptr << ' ';
-    ptr += sizeof(uint64_t);
+        std::cout << "N=" << nentries << ' ';
+    ptr += Serializer<uint64_t>::serialize(ptr, nentries);
 
     for (unsigned* idxit = writeset; idxit < writeset + nwriteset; idxit++) {
         if (*idxit < tset_initial_capacity)
@@ -310,8 +312,9 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
 
         // object id
         uint64_t obj_id = ptr_to_object_id[(void *) it->owner()];
-        *(uint64_t *) ptr = obj_id;
-        ptr += sizeof(uint64_t);
+        ptr += Serializer<uint64_t>::serialize(ptr, obj_id);
+
+        // object-specific data
         int nb = it->owner()->write_log_entry(*it, ptr);
 
         if(debug_txn_log) {
@@ -343,6 +346,7 @@ void Transaction::flush_log_batch() {
 
     assert(thr.log_buf_used <= STO_LOG_BUF_SIZE);
 
+    // Variable length ints are not used in the header
     uint64_t *log_buf = (uint64_t *) thr.log_buf;
     log_buf[0] = thr.log_buf_used;
     log_buf[1] = thr.max_logged_tid;

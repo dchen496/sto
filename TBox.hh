@@ -94,10 +94,10 @@ public:
     }
 
     int log_entry_size(TransItem &item) {
-        return Serializer<T>::size(std::move(item.template write_value<T>()));
+        return Serializer<T>::size(item.template write_value<T>());
     }
     int write_log_entry(TransItem &item, char *buf) {
-        return Serializer<T>::serialize(buf, std::move(item.template write_value<T>()));
+        return Serializer<T>::serialize(buf, item.template write_value<T>());
     }
     bool apply_log_entry(char *entry, TransactionTid::type log_tid, int &bytes_read) {
         T v;
