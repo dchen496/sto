@@ -228,6 +228,7 @@ int LogApply::listen(unsigned nthreads, int start_port, std::function<void()> ap
 
     pthread_create(&advance_thread, nullptr, &advancer, nullptr);
 
+    // wait for shutdown
     for (int i = 0; i < nrecv_threads; i++)
         pthread_join(recv_threads[i].handle, nullptr);
 
@@ -286,11 +287,11 @@ void *LogApply::receiver(void* argsptr) {
 
             batch.recv_thr_id = thr.thread_id;
 
-            // don't accumulate more than 1 buffer per thread
+            // don't accumulate more than a fixed number of buffers per thread
             // waiting here creates back-pressure on the sender
             // XXX: is this the right number?
-       /*     while (athr.batch_queue.size() >= 1)
-                athr.batch_queue_cond.wait(lk); */
+            while (athr.batch_queue.size() >= 100)
+                athr.batch_queue_cond.wait(lk);
 
             athr.batch_queue.push(batch);
             athr.batch_queue_cond.notify_all();
@@ -338,7 +339,7 @@ bool LogApply::read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatc
 
     uint64_t len;
     ptr += Serializer<uint64_t>::deserialize(ptr, len);
-    assert(len < STO_LOG_BUF_SIZE);
+    assert(len <= STO_LOG_BUF_SIZE);
 
     uint64_t received_tid;
     ptr += Serializer<uint64_t>::deserialize(ptr, received_tid);
@@ -360,85 +361,70 @@ bool LogApply::read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatc
 
 void *LogApply::applier(void *argsptr) {
     ApplyThread &thr = *(ApplyThread *) argsptr;
-    TThread::set_id(thr.thread_id);
-    thr.init_fn();
-
     std::queue<LogBatch> batches;
 
-    bool running = true;
-    while (running) {
+    TThread::set_id(thr.thread_id);
+    thr.init_fn();
+    while (true) {
         ApplyState state = apply_state;
+        uint64_t max_tid;
         acquire_fence();
         switch (state) {
         case ApplyState::IDLE:
             // TODO: process some read only transactions
-            // just waste time for now
-            while (apply_state == ApplyState::IDLE) {
-                usleep(10);
-                fence();
-            }
             break;
         case ApplyState::APPLY:
-            {
-                uint64_t max_tid = tid_bound;
-                while (true) {
-                    if (batches.empty()) {
-                        std::unique_lock<std::mutex> lk(thr.mu);
-                        while (thr.batch_queue.empty() && thr.received_tid != ~0ULL)
-                            thr.batch_queue_cond.wait(lk);
-                        while (!thr.batch_queue.empty()) {
-                            batches.push(std::move(thr.batch_queue.front()));
-                            thr.batch_queue.pop();
-                        }
-                        thr.batch_queue_cond.notify_all();
+            max_tid = tid_bound;
+            while (true) {
+                if (batches.empty()) {
+                    std::unique_lock<std::mutex> lk(thr.mu);
+                    while (thr.batch_queue.empty() && thr.received_tid != ~0ULL)
+                        thr.batch_queue_cond.wait(lk);
+                    while (!thr.batch_queue.empty()) {
+                        batches.push(std::move(thr.batch_queue.front()));
+                        thr.batch_queue.pop();
                     }
-
-                    if (batches.empty() && thr.received_tid == ~0ULL)
-                        break;
-
-                    LogBatch &batch = batches.front();
-                    if (!process_batch_part(batch, max_tid))
-                        break;
-                    if (batch.start >= batch.end) {
-                        if (batch.needs_free) {
-                            delete[] batch.buf;
-                        } else {
-                            RecvThread &rthr = recv_threads[batch.recv_thr_id];
-                            std::unique_lock<std::mutex> lk(rthr.mu);
-                            rthr.free_queue.push(batch);
-                        }
-                        batches.pop();
-                    }
+                    thr.batch_queue_cond.notify_all();
                 }
 
-                release_fence();
-                thr.processed_tid = max_tid;
+                if (batches.empty() && thr.received_tid == ~0ULL)
+                    break;
 
-                while (apply_state == ApplyState::APPLY) {
-                    usleep(10);
-                    fence();
+                LogBatch &batch = batches.front();
+                if (!process_batch_part(batch, max_tid))
+                    break;
+                if (batch.start >= batch.end) {
+                    if (batch.needs_free) {
+                        delete[] batch.buf;
+                    } else {
+                        RecvThread &rthr = recv_threads[batch.recv_thr_id];
+                        std::unique_lock<std::mutex> lk(rthr.mu);
+                        rthr.free_queue.push(batch);
+                    }
+                    batches.pop();
                 }
             }
+
+            release_fence();
+            thr.processed_tid = max_tid;
             break;
         case ApplyState::CLEAN:
-            {
-                uint64_t max_tid = tid_bound;
-                run_cleanup();
-                release_fence();
-                thr.cleaned_tid = max_tid;
-                while (apply_state == ApplyState::CLEAN) {
-                    usleep(10);
-                    fence();
-                }
-            }
+            max_tid = tid_bound;
+            run_cleanup();
+            release_fence();
+            thr.cleaned_tid = max_tid;
+
             break;
         case ApplyState::KILL:
-            running = false;
-            break;
+            return nullptr;
+        }
+
+        fence();
+        while (apply_state == state) {
+            usleep(10);
+            fence();
         }
     }
-
-    return nullptr;
 }
 
 bool LogApply::process_batch_part(LogBatch &batch, uint64_t max_tid) {
@@ -496,6 +482,7 @@ int LogApply::advance() {
     assert(apply_state == ApplyState::IDLE);
     fence();
 
+    // compute TID bound (minimum of TIDs received by each worker)
     Transaction::tid_type min_received_tid = ~0ULL;
     for (int i = 0; i < napply_threads; i++)
         min_received_tid = std::min(min_received_tid, apply_threads[i].received_tid);
@@ -508,7 +495,7 @@ int LogApply::advance() {
     release_fence();
     apply_state = ApplyState::APPLY;
 
-    // send ack to primary
+    // send acks to primary
     for (int i = 0; i < nrecv_threads; i++) {
         RecvThread &thr = recv_threads[i];
         int len = sizeof(uint64_t);
@@ -518,6 +505,7 @@ int LogApply::advance() {
         }
     }
 
+    // wait for apply phase to complete
     Transaction::tid_type min_processed_tid = 0;
     while (min_processed_tid < min_received_tid) {
         usleep(10); // should be significantly less than the sleep between advances
@@ -530,6 +518,8 @@ int LogApply::advance() {
 
     release_fence();
     apply_state = ApplyState::CLEAN;
+
+    // wait for clean phase to complete
     Transaction::tid_type min_cleaned_tid = 0;
     while (min_cleaned_tid < min_processed_tid) {
         usleep(10);
@@ -540,6 +530,7 @@ int LogApply::advance() {
     }
     assert(min_cleaned_tid == min_processed_tid);
 
+    // return to idle phase
     release_fence();
     apply_state = ApplyState::IDLE;
     return 0;
@@ -582,6 +573,7 @@ void LogApply::run_cleanup() {
     ApplyThread &thr = apply_threads[TThread::id()];
     for (std::function<void()> callback : thr.cleanup_callbacks)
         callback();
+    thr.cleanup_callbacks.clear();
 }
 
 void LogApply::cleanup(std::function<void()> callback) {

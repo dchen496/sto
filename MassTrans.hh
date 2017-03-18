@@ -659,7 +659,7 @@ public:
       memcpy(keybuf, key.data(), key.length());
       version_key_type vk = { .vers = log_tid | invalid_bit, .key = Str(keybuf, key.length()) };
       V dummy = V();
-      versioned_value *val = versioned_value::make(std::move(dummy), vk);
+      versioned_value *val = (versioned_value*) versioned_value::make(std::move(dummy), vk);
       lp.value() = val;
       Str key_copy = val->key();
       LogApply::cleanup([=](){ remove_key_if_invalid(key_copy); });
@@ -677,6 +677,11 @@ public:
         versioned_value *val = lp.value();
         bool do_update = TransactionTid::lock_if_older(val->version(), log_tid);
         if (do_update) {
+          if (val->needsResize(value)) {
+            // need to acquire tree locks for resize
+            unlock(val);
+            break;
+          }
           // the value box may have been resized since we weren't holding tree locks
           if (val->version() & resized_bit) {
             continue; // retry (is there a better way of doing this by just rereading the leaf?)
@@ -723,7 +728,7 @@ public:
     char *keybuf = (char *) malloc(key.length());
     memcpy(keybuf, key.data(), key.length());
     version_key_type vk = { .vers = log_tid, .key = Str(keybuf, key.length()) };
-    versioned_value *val = versioned_value::make(std::move(value), vk);
+    versioned_value *val = (versioned_value *) versioned_value::make(std::move(value), vk);
     lp.value() = val;
     lp.finish(1, *ti.ti);
     return true;
@@ -733,11 +738,14 @@ public:
     threadinfo_type& ti = mythreadinfo;
     cursor_type lp(table_, key);
     bool found = lp.find_locked(*ti.ti);
-    if (found && (lp.value()->version() & invalid_bit)) {
+    bool do_remove = found && (lp.value()->version() & invalid_bit);
+    if (do_remove) {
+      std::stringstream ss;
+      std::cerr << ss.str();
       ti.ti->deallocate_rcu(key.mutable_data(), key.length(), memtag_value);
       lp.value()->deallocate_rcu(*ti.ti);
     }
-    lp.finish(found ? -1 : 0, *ti.ti);
+    lp.finish(do_remove ? -1 : 0, *ti.ti);
   }
 
   bool remove(const Str& key, threadinfo_type& ti = mythreadinfo) {
@@ -836,7 +844,7 @@ protected:
       // version before we check if the node is valid
       Version v = e->version();
       fence();
-      item.observe(tversion_type(v));
+      item.observe(tversion_type(v), !INSERT); // if we are inserting we don't need to track whether the node was found/not found
     }
     if (SET) {
       reallyHandlePutFound(item, e, key, value);

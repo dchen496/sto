@@ -88,7 +88,7 @@ struct ThreadArgs {
     int ntxns;
 };
 
-void *test_multithreadedWorker(void *argptr) {
+void *test_multithreaded_worker(void *argptr) {
     ThreadArgs &args = *(ThreadArgs *) argptr;
     TThread::set_id(args.id);
     TBox<int> *fs = args.fs;
@@ -133,7 +133,7 @@ void test_multithreaded(int batch) {
     ThreadArgs args[nthread];
     for (int i = 0; i < nthread; i++) {
         args[i] = { .id = i, .batch = batch, .fs = fs, .n = n, .ntxns = 0 };
-        pthread_create(&thrs[i], nullptr, test_multithreadedWorker, (void *) &args[i]);
+        pthread_create(&thrs[i], nullptr, test_multithreaded_worker, (void *) &args[i]);
     }
     for (int i = 0; i < nthread; i++)
         pthread_join(thrs[i], nullptr);
@@ -186,6 +186,10 @@ void test_simple_string() {
 int main() {
     TThread::set_id(0);
     Transaction::debug_txn_log = false;
+    pthread_t advancer;
+    pthread_create(&advancer, NULL, Transaction::epoch_advancer, NULL);
+    pthread_detach(advancer);
+
     test_simple_int(0);
     test_simple_int(1);
     //test_many_writes(0);
