@@ -14,7 +14,6 @@ std::function<void(threadinfo_t::epoch_type)> Transaction::epoch_advance_callbac
 bool Transaction::log_enable;
 std::unordered_map<void *, uint64_t> Transaction::ptr_to_object_id;
 std::unordered_map<uint64_t, void *> Transaction::object_id_to_ptr;
-bool Transaction::debug_txn_log = STO_DEBUG_TXN_LOG;
 
 TransactionTid::type __attribute__((aligned(128))) Transaction::_TID = 2 * TransactionTid::increment_value;
    // reserve TransactionTid::increment_value for prepopulated
@@ -290,16 +289,21 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
 
     thr.max_logged_tid = tid;
 
-    // write log entry to buffer
+#if STO_DEBUG_TXN_LOG
+    std::stringstream ss;
+#endif
 
+    // write log entry to buffer
     // TID
-    if (debug_txn_log)
-        std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << tid << ' ' << std::dec;
+#if STO_DEBUG_TXN_LOG
+    ss << "TID=" << std::hex << std::setfill('0') << std::setw(8) << tid << ' ';
+#endif
     ptr += Serializer<tid_type>::serialize(ptr, tid);
 
     // number of entries
-    if (debug_txn_log)
-        std::cout << "N=" << nentries << ' ';
+#if STO_DEBUG_TXN_LOG
+    ss << std::dec << "N=" << nentries << ' ';
+#endif
     ptr += Serializer<uint64_t>::serialize(ptr, nentries);
 
     for (unsigned* idxit = writeset; idxit < writeset + nwriteset; idxit++) {
@@ -317,17 +321,21 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
         // object-specific data
         int nb = it->owner()->write_log_entry(*it, ptr);
 
-        if(debug_txn_log) {
-            std::cout << nb << ":(" << std::hex << std::setw(2) << obj_id << " " << std::dec;
-            for (int i = 0; i < nb; i++) {
-                std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) (unsigned char) ptr[i] << std::dec;
-            }
-            std::cout << ") ";
+#if STO_DEBUG_TXN_LOG
+        ss << std::dec << nb << ":(" << std::setw(2) << obj_id << " ";
+        ss << std::hex << std::setfill('0') << std::setw(2);
+        for (int i = 0; i < nb; i++) {
+            ss << (int) (unsigned char) ptr[i];
         }
+        ss << ") ";
+#endif
         ptr += nb;
     }
-    if (debug_txn_log)
-        std::cout << '\n';
+
+#if STO_DEBUG_TXN_LOG
+    ss << "\n";
+    std::cout << ss.str();
+#endif
 
     uint64_t new_used = ptr - thr.log_buf;
     assert(new_used == thr.log_buf_used + size);
@@ -356,8 +364,10 @@ void Transaction::flush_log_batch() {
 
     LogSend::enqueue_batch(thr.log_buf, thr.log_buf_used);
 
-    if (debug_txn_log)
-        std::cout << "Thread " << TThread::id() << " flushed " << thr.log_buf_used << " bytes\n";
+#if STO_DEBUG_TXN_LOG
+    std::cout << "Thread " << TThread::id() << " flushed " << thr.log_buf_used << " bytes\n";
+#endif
+
     thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
     thr.log_buf = LogSend::get_buffer();
 }

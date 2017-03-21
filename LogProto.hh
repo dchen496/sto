@@ -63,7 +63,6 @@ public:
   static void stop();
   static void cleanup(std::function<void()> callback);
 
-  static bool debug_txn_log;
   static uint64_t txns_processed[MAX_THREADS];
 
 private:

@@ -185,7 +185,6 @@ void test_simple_string() {
 
 int main() {
     TThread::set_id(0);
-    Transaction::debug_txn_log = false;
     pthread_t advancer;
     pthread_create(&advancer, NULL, Transaction::epoch_advancer, NULL);
     pthread_detach(advancer);

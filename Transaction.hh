@@ -74,7 +74,6 @@
 #define STO_LOG_BATCH_HEADER_SIZE (2 * sizeof(uint64_t))
 #define STO_LOG_MAX_BATCH (STO_LOG_BUF_SIZE - STO_LOG_BATCH_HEADER_SIZE)
 
-#define STO_DEBUG_TXN_LOG 1
 #ifndef STO_DEBUG_TXN_LOG
 #define STO_DEBUG_TXN_LOG 0
 #endif
@@ -242,7 +241,6 @@ public:
     } global_epochs;
     typedef TransactionTid::type tid_type;
 
-    static bool debug_txn_log;
 private:
     static TransactionTid::type _TID;
 public:
@@ -313,6 +311,12 @@ public:
       assert(ptr_to_object_id.find(ptr) == ptr_to_object_id.end());
       ptr_to_object_id[ptr] = id;
       object_id_to_ptr[id] = ptr;
+    }
+    static void unregister_object(TObject &obj) {
+      void *ptr = &obj;
+      assert(ptr_to_object_id.find(ptr) != ptr_to_object_id.end());
+      object_id_to_ptr.erase(ptr_to_object_id[ptr]);
+      ptr_to_object_id.erase(ptr);
     }
     static void clear_registered_objects() {
       ptr_to_object_id.clear();

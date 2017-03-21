@@ -166,7 +166,6 @@ void *LogSend::sender(void *argsptr) {
 }
 
 
-bool LogApply::debug_txn_log = STO_DEBUG_TXN_LOG;
 uint64_t LogApply::txns_processed[MAX_THREADS];
 
 int LogApply::nrecv_threads;
@@ -357,9 +356,9 @@ bool LogApply::read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatc
     batch.max_tid = received_tid;
     batch.start = batch.buf + STO_LOG_BATCH_HEADER_SIZE;
     batch.end = batch.buf + len;
-    if (debug_txn_log) {
-        std::cout << "Thread " << TThread::id() << " received " << len << " bytes\n";
-    }
+#if STO_DEBUG_TXN_LOG
+    std::cout << "Thread " << TThread::id() << " received " << len << " bytes\n";
+#endif
     return true;
 }
 
@@ -452,10 +451,10 @@ char *LogApply::process_txn(char *ptr) {
     uint64_t nentries;
     ptr += Serializer<uint64_t>::deserialize(ptr, nentries);
 
-    if (debug_txn_log) {
-        std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << tid << ' ';
-        std::cout << "N=" << nentries << ' ';
-    }
+#if STO_DEBUG_TXN_LOG
+    std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << tid << ' ';
+    std::cout << "N=" << nentries << ' ';
+#endif
 
     assert(tid > thr.processed_tid);
 
@@ -467,17 +466,18 @@ char *LogApply::process_txn(char *ptr) {
         int bytes_read = 0;
         obj.apply_log_entry(ptr, tid, bytes_read);
 
-        if (debug_txn_log) {
-            std::cout << std::dec << bytes_read << ":(" << std::hex << std::setw(2) << object_id << " ";
-            for (int i = 0; i < bytes_read; i++) {
-                std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) (unsigned char) ptr[i];
-            }
-            std::cout << ") ";
+#if STO_DEBUG_TXN_LOG
+        std::cout << std::dec << bytes_read << ":(" << std::hex << std::setw(2) << object_id << " ";
+        for (int i = 0; i < bytes_read; i++) {
+            std::cout << std::hex << std::setfill('0') << std::setw(2) << (int) (unsigned char) ptr[i];
         }
+        std::cout << ") ";
+#endif
         ptr += bytes_read;
     }
-    if (debug_txn_log)
-        std::cout << '\n';
+#if STO_DEBUG_TXN_LOG
+    std::cout << '\n';
+#endif
 
     release_fence();
     thr.processed_tid = tid;

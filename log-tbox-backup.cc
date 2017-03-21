@@ -36,7 +36,6 @@ int main(int argc, char **argv) {
     listen_host = std::string(*arg++);
     start_port = atoi(*arg++);
 
-    LogApply::debug_txn_log = false;
     pthread_t advancer;
     pthread_create(&advancer, NULL, Transaction::epoch_advancer, NULL);
     pthread_detach(advancer);

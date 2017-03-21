@@ -271,7 +271,6 @@ void test_multithreaded_int(bool mostly_inserts) {
 int main() {
     TThread::set_id(0);
     thread_init();
-    LogApply::debug_txn_log = false;
     pthread_t advancer;
     pthread_create(&advancer, NULL, Transaction::epoch_advancer, NULL);
     pthread_detach(advancer);

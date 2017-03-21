@@ -81,7 +81,6 @@ void test_simple_string() {
 }
 
 int main() {
-    LogApply::debug_txn_log = false;
     pthread_t advancer;
     pthread_create(&advancer, NULL, Transaction::epoch_advancer, NULL);
     pthread_detach(advancer);

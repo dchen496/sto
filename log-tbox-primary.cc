@@ -134,7 +134,6 @@ int main(int argc, char **argv) {
     start_port = atoi(*arg++);
 
     TThread::set_id(0);
-    Transaction::debug_txn_log = false;
     pthread_t advancer;
     pthread_create(&advancer, NULL, Transaction::epoch_advancer, NULL);
     pthread_detach(advancer);
