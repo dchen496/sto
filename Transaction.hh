@@ -677,6 +677,10 @@ public:
 
     static void flush_log_batch();
 
+    static tid_type get_global_tid() {
+        return fetch_and_add(&_TID, TransactionTid::increment_value);
+    }
+
 private:
     enum {
         s_in_progress = 0, s_opacity_check = 1, s_committing = 2,

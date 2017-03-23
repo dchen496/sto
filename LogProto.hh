@@ -7,7 +7,6 @@
 
 class LogSend {
   struct LogBatch {
-    int worker_id;
     char *buf;
     int len;
   };
@@ -17,6 +16,7 @@ public:
   static void stop();
   static void enqueue_batch(char *buf, int len);
   static char* get_buffer();
+  static void set_active(bool active, int thread_id);
 
 private:
   static void *sender(void *argsptr);
@@ -30,6 +30,7 @@ private:
     std::mutex mu;
     std::queue<LogBatch> batch_queue;
     std::condition_variable batch_queue_cond;
+    bool active;
   };
 
   static int nsend_threads;
@@ -52,7 +53,6 @@ class LogApply {
   struct LogBatch {
     uint64_t recv_thr_id;
     uint64_t max_tid;
-    bool needs_free;
     char *buf;
     char *start;
     char *end;
