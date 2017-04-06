@@ -2,83 +2,75 @@
 #include <cassert>
 #include <vector>
 #include <chrono>
+#include <cstdlib>
+
 #include "Transaction.hh"
-#include "TBox.hh"
+#include "MassTrans.hh"
 
 const int startup_delay = 500000;
+typedef MassTrans<std::string, versioned_str_struct, /* opacity */ false> mbta_type;
 
 int nthreads;
+int ntrees;
 int niters;
+int nkeys;
+int strsize;
 int txnsize;
 std::string backup_host;
 int start_port;
 
 template <typename T>
+std::string to_str(T v) {
+    std::stringstream ss;
+    ss << v;
+    return ss.str();
+}
+
 struct ThreadArgs {
     int id;
-    TBox<T> *fs;
+    mbta_type *fs;
     bool enable_logging;
 };
 
-template <int S>
-struct filler {
-    static_assert(S % sizeof(int) == 0, "S must be a multiple of the int size");
-
-    int buf[S / sizeof(int)];
-
-    filler() = default;
-    filler(const filler &f) = default;
-    filler &operator=(const filler &f) = default;
-
-    filler(int x) {
-        for (int i = 0; i < S / sizeof(int); i++) {
-            buf[i] = x;
-        }
-    }
-
-    friend std::ostream &operator<<(std::ostream &stream, const filler &f) {
-        return stream;
-    }
-};
-
-template <typename T>
 void *test_multithreaded_worker(void *argptr) {
-    ThreadArgs<T> &args = *(ThreadArgs<T> *) argptr;
+    ThreadArgs &args = *(ThreadArgs *) argptr;
     TThread::set_id(args.id);
+    mbta_type::thread_init();
 
-    /*
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(args.id, &cpuset);
-    CPU_SET(args.id + 32, &cpuset);
-    sched_setaffinity(0, sizeof(cpuset), &cpuset);
-    */
+    mbta_type *fs = args.fs;
+    std::string val;
+    val.resize(strsize);
 
-    TBox<T> *fs = args.fs;
-    int val = 0;
     for (int i = 0; i < niters; i++) {
-        TransactionGuard t;
-        for (int j = 0; j < txnsize; j++) {
-            fs[j + args.id * txnsize] = val;
-            val++;
+        Sto::start_transaction();
+        try {
+            for (int j = 0; j < txnsize; j++) {
+                std::string key_str = to_str(((unsigned) rand()) % nkeys);
+                mbta_type &f = fs[((unsigned) rand()) % ntrees];
+                val[((unsigned) rand()) % strsize] = (char) rand();
+
+                f.transPut(key_str, val);
+            }
+            Sto::try_commit();
+        } catch (Transaction::Abort e) {
         }
+        //usleep(1);
     }
     if (args.enable_logging)
         Transaction::flush_log_batch();
     return nullptr;
 }
 
-template <typename T>
 void test_multithreaded(bool enable_logging) {
     usleep(startup_delay);
-    std::vector<TBox<T>> fs(nthreads * txnsize);
+    std::vector<mbta_type> fs(ntrees);
     for (unsigned i = 0; i < fs.size(); i++)
         Transaction::register_object(fs[i], i);
     if (enable_logging)
         assert(Transaction::init_logging(nthreads, {backup_host}, start_port) == 0);
 
     std::vector<pthread_t> thrs(nthreads);
-    std::vector<ThreadArgs<T>> args(nthreads);
+    std::vector<ThreadArgs> args(nthreads);
 
     using hc = std::chrono::high_resolution_clock;
 
@@ -86,7 +78,7 @@ void test_multithreaded(bool enable_logging) {
 
     for (int i = 0; i < nthreads; i++) {
         args[i] = { .id = i, .fs = fs.data(), .enable_logging = enable_logging };
-        pthread_create(&thrs[i], nullptr, &test_multithreaded_worker<T>, (void *) &args[i]);
+        pthread_create(&thrs[i], nullptr, &test_multithreaded_worker, (void *) &args[i]);
     }
     for (int i = 0; i < nthreads; i++)
         pthread_join(thrs[i], nullptr);
@@ -121,24 +113,26 @@ void test_multithreaded(bool enable_logging) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 6) {
-        printf("usage: log-tbox-primary nthreads niters txnsize backup_host start_port\n");
+    if (argc != 9) {
+        printf("usage: log-masstrans-primary nthreads ntrees nkeys niters strsize txnsize backup_host start_port\n");
         return -1;
     }
 
     char **arg = &argv[1];
     nthreads = atoi(*arg++);
+    ntrees = atoi(*arg++);
+    nkeys = atoi(*arg++);
     niters = atoi(*arg++);
+    strsize = atoi(*arg++);
     txnsize = atoi(*arg++);
     backup_host = std::string(*arg++);
     start_port = atoi(*arg++);
 
-    TThread::set_id(0);
     pthread_t advancer;
     pthread_create(&advancer, NULL, Transaction::epoch_advancer, NULL);
     pthread_detach(advancer);
 
-    test_multithreaded<int64_t>(false);
-    test_multithreaded<int64_t>(true);
+    test_multithreaded(false);
+    test_multithreaded(true);
     return 0;
 }

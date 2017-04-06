@@ -35,6 +35,8 @@
 /ex-counter
 /log-tbox-primary
 /log-tbox-backup
+/log-masstrans-primary
+/log-masstrans-backup
 /unit-rcu
 /unit-tarray
 /unit-tbox

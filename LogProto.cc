@@ -12,7 +12,8 @@ LogSend::SendThread LogSend::send_threads[MAX_THREADS];
 int LogSend::nworker_threads;
 LogSend::WorkerThread LogSend::worker_threads[MAX_THREADS];
 
-constexpr bool use_cv = true;
+//constexpr bool use_cv = true;
+constexpr bool use_cv = false;
 
 int LogSend::create_threads(unsigned nthreads, std::vector<std::string> hosts, int start_port) {
     run = true;
@@ -334,7 +335,8 @@ void *LogApply::receiver(void* argsptr) {
             */
 
             athr.batch_queue.push(batch);
-            athr.batch_queue_cond.notify_all();
+            if (use_cv)
+                athr.batch_queue_cond.notify_all();
         }
     }
 
@@ -342,7 +344,8 @@ void *LogApply::receiver(void* argsptr) {
         ApplyThread &athr = apply_threads[thr.thread_id];
         std::unique_lock<std::mutex> lk(athr.mu);
         athr.received_tid = ~0ULL;
-        athr.batch_queue_cond.notify_all();
+        if (use_cv)
+            athr.batch_queue_cond.notify_all();
     }
 
     return nullptr;
@@ -424,13 +427,21 @@ void *LogApply::applier(void *argsptr) {
             while (true) {
                 if (batches.empty()) {
                     std::unique_lock<std::mutex> lk(thr.mu);
-                    while (thr.batch_queue.empty() && thr.received_tid != ~0ULL)
-                        thr.batch_queue_cond.wait(lk);
+                    while (thr.batch_queue.empty() && thr.received_tid != ~0ULL) {
+                        if (use_cv) {
+                            thr.batch_queue_cond.wait(lk);
+                        } else {
+                            lk.unlock();
+                            usleep(10);
+                            lk.lock();
+                        }
+                    }
                     while (!thr.batch_queue.empty()) {
                         batches.push(std::move(thr.batch_queue.front()));
                         thr.batch_queue.pop();
                     }
-                    thr.batch_queue_cond.notify_all();
+                    if (use_cv)
+                        thr.batch_queue_cond.notify_all();
                 }
 
                 if (batches.empty() && thr.received_tid == ~0ULL)
@@ -463,7 +474,7 @@ void *LogApply::applier(void *argsptr) {
 
         fence();
         while (apply_state == state) {
-            usleep(10);
+            usleep(1);
             fence();
         }
     }
@@ -535,17 +546,28 @@ int LogApply::advance() {
 
     // compute TID bound (minimum of TIDs received by each worker)
     Transaction::tid_type min_received_tid = ~0ULL;
-    for (int i = 0; i < napply_threads; i++)
+    for (int i = 0; i < napply_threads; i++) {
+        printf("%lu ", apply_threads[i].received_tid);
         min_received_tid = std::min(min_received_tid, apply_threads[i].received_tid);
+    }
     acquire_fence();
     assert(min_received_tid >= tid_bound);
-    if (min_received_tid == tid_bound)
+    if (min_received_tid == tid_bound) {
+        printf("\n");
         return 0;
+    }
 
-    printf("applying %lu to %lu\n", tid_bound, min_received_tid);
+    printf(" | %lu -> %lu + %lu\n", tid_bound, min_received_tid, min_received_tid - tid_bound);
+    if (min_received_tid > tid_bound + 10000000 && min_received_tid != ~0ULL)
+        min_received_tid = tid_bound + 10000000;
     tid_bound = min_received_tid;
     release_fence();
     apply_state = ApplyState::APPLY;
+
+    for (int i = 0; i < napply_threads; i++) {
+        printf("%d ", (int64_t) tid_bound - (int64_t) apply_threads[i].received_tid);
+    }
+    printf("\n");
 
     /*
     // send acks to primary
@@ -570,6 +592,7 @@ int LogApply::advance() {
     }
     assert(min_processed_tid == min_received_tid);
 
+    printf("finished apply\n");
     release_fence();
     apply_state = ApplyState::CLEAN;
 
@@ -585,6 +608,7 @@ int LogApply::advance() {
     assert(min_cleaned_tid == min_processed_tid);
 
     // return to idle phase
+    printf("finished clean\n");
     release_fence();
     apply_state = ApplyState::IDLE;
     return 0;
@@ -618,7 +642,7 @@ void *LogApply::advancer(void *) {
             apply_state = ApplyState::KILL;
             return nullptr;
         }
-        usleep(10000);
+        usleep(1);
     }
     return nullptr;
 }
