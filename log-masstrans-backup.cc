@@ -41,6 +41,7 @@ int main(int argc, char **argv) {
     listen_host = std::string(*arg++);
     start_port = atoi(*arg++);
 
+    mbta_type::static_init();
     pthread_t advancer;
     pthread_create(&advancer, NULL, Transaction::epoch_advancer, NULL);
     pthread_detach(advancer);

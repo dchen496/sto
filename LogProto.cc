@@ -12,8 +12,7 @@ LogSend::SendThread LogSend::send_threads[MAX_THREADS];
 int LogSend::nworker_threads;
 LogSend::WorkerThread LogSend::worker_threads[MAX_THREADS];
 
-//constexpr bool use_cv = true;
-constexpr bool use_cv = false;
+constexpr bool use_cv = true;
 
 int LogSend::create_threads(unsigned nthreads, std::vector<std::string> hosts, int start_port) {
     run = true;
@@ -287,13 +286,12 @@ void LogApply::stop() {
 void *LogApply::receiver(void* argsptr) {
     RecvThread &thr = *(RecvThread *) argsptr;
 
+    std::vector<char *> buffer_pool;
     thr.sock_fd = accept(thr.listen_fd, NULL, NULL);
     if (thr.sock_fd < 0) {
         perror("couldn't accept connection");
         return nullptr;
     }
-
-    std::vector<char *> buffer_pool;
 
     // terminates when the primary disconnects
     while (true) {
@@ -474,7 +472,7 @@ void *LogApply::applier(void *argsptr) {
 
         fence();
         while (apply_state == state) {
-            usleep(1);
+            usleep(1000);
             fence();
         }
     }
@@ -514,6 +512,12 @@ char *LogApply::process_txn(char *ptr) {
 
     assert(tid > thr.processed_tid);
 
+    threadinfo_t &tthr = Transaction::tinfo[TThread::id()];
+    tthr.epoch = Transaction::global_epochs.global_epoch;
+    tthr.rcu_set.clean_until(Transaction::global_epochs.active_epoch);
+    if (tthr.trans_start_callback)
+        tthr.trans_start_callback();
+
     for (uint64_t i = 0; i < nentries; i++) {
         uint64_t object_id;
         ptr += Serializer<uint64_t>::deserialize(ptr, object_id);
@@ -535,7 +539,11 @@ char *LogApply::process_txn(char *ptr) {
     std::cout << '\n';
 #endif
 
+    if (tthr.trans_end_callback)
+        tthr.trans_end_callback();
+
     release_fence();
+
     thr.processed_tid = tid;
     return ptr;
 }
@@ -546,28 +554,16 @@ int LogApply::advance() {
 
     // compute TID bound (minimum of TIDs received by each worker)
     Transaction::tid_type min_received_tid = ~0ULL;
-    for (int i = 0; i < napply_threads; i++) {
-        printf("%lu ", apply_threads[i].received_tid);
+    for (int i = 0; i < napply_threads; i++)
         min_received_tid = std::min(min_received_tid, apply_threads[i].received_tid);
-    }
     acquire_fence();
     assert(min_received_tid >= tid_bound);
-    if (min_received_tid == tid_bound) {
-        printf("\n");
+    if (min_received_tid == tid_bound)
         return 0;
-    }
 
-    printf(" | %lu -> %lu + %lu\n", tid_bound, min_received_tid, min_received_tid - tid_bound);
-    if (min_received_tid > tid_bound + 10000000 && min_received_tid != ~0ULL)
-        min_received_tid = tid_bound + 10000000;
     tid_bound = min_received_tid;
     release_fence();
     apply_state = ApplyState::APPLY;
-
-    for (int i = 0; i < napply_threads; i++) {
-        printf("%d ", (int64_t) tid_bound - (int64_t) apply_threads[i].received_tid);
-    }
-    printf("\n");
 
     /*
     // send acks to primary
@@ -592,7 +588,6 @@ int LogApply::advance() {
     }
     assert(min_processed_tid == min_received_tid);
 
-    printf("finished apply\n");
     release_fence();
     apply_state = ApplyState::CLEAN;
 
@@ -608,7 +603,6 @@ int LogApply::advance() {
     assert(min_cleaned_tid == min_processed_tid);
 
     // return to idle phase
-    printf("finished clean\n");
     release_fence();
     apply_state = ApplyState::IDLE;
     return 0;
@@ -642,7 +636,7 @@ void *LogApply::advancer(void *) {
             apply_state = ApplyState::KILL;
             return nullptr;
         }
-        usleep(1);
+        usleep(10000);
     }
     return nullptr;
 }
