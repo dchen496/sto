@@ -204,6 +204,8 @@ struct __attribute__((aligned(128))) threadinfo_t {
 
     char *log_buf;
     int log_buf_used;
+    char *send_log_buf;
+    int send_log_buf_used;
     TransactionTid::type max_logged_tid;
     TransactionTid::type max_synced_tid;
     log_stats_t log_stats;
@@ -212,6 +214,8 @@ struct __attribute__((aligned(128))) threadinfo_t {
         epoch(0),
         log_buf(nullptr),
         log_buf_used(0),
+        send_log_buf(nullptr),
+        send_log_buf_used(0),
         max_logged_tid(0),
         max_synced_tid(0),
         log_stats() {
@@ -676,6 +680,7 @@ public:
     }
 
     static void flush_log_batch();
+    static void defer_flush_log_batch();
 
     static tid_type get_global_tid() {
         return fetch_and_add(&_TID, TransactionTid::increment_value);

@@ -196,6 +196,10 @@ void Transaction::stop(bool committed, unsigned* writeset, unsigned nwriteset) {
         goto after_unlock;
 
     if (committed && !STO_SORT_WRITESET) {
+        // log this transaction's writeset to the current thread's log buffer
+        if (log_enable && any_writes_ && committed)
+           append_log_entry(writeset, nwriteset);
+
         for (unsigned* idxit = writeset + nwriteset; idxit != writeset; ) {
             --idxit;
             if (*idxit < tset_initial_capacity)
@@ -205,10 +209,6 @@ void Transaction::stop(bool committed, unsigned* writeset, unsigned nwriteset) {
             if (it->needs_unlock())
                 it->owner()->unlock(*it);
         }
-
-        // log this transaction's writeset to the current thread's log buffer
-        if (log_enable && any_writes_ && committed)
-           append_log_entry(writeset, nwriteset);
 
         for (unsigned* idxit = writeset + nwriteset; idxit != writeset; ) {
             --idxit;
@@ -244,6 +244,12 @@ after_unlock:
         thr.trans_end_callback();
     // XXX should reset trans_end_callback after calling it...
     state_ = s_aborted + committed;
+
+    if (thr.send_log_buf != nullptr) {
+        LogSend::enqueue_batch(thr.send_log_buf, thr.send_log_buf_used);
+        thr.send_log_buf = nullptr;
+        thr.send_log_buf_used = 0;
+    }
 }
 
 void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
@@ -285,6 +291,10 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
 
     // XXX handle special case if the txn entry is too big
     assert(thr.log_buf_used + size <= STO_LOG_BUF_SIZE);
+    if (thr.log_buf_used + size > STO_LOG_BUF_SIZE) {
+       printf("transaction is too large!\n");
+       std::abort();
+    }
     char *ptr = thr.log_buf + thr.log_buf_used;
 
     thr.max_logged_tid = tid;
@@ -349,7 +359,7 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
 }
 
 // See LogProto.cc for the wire format
-void Transaction::flush_log_batch() {
+void Transaction::defer_flush_log_batch() {
     threadinfo_t& thr = tinfo[TThread::id()];
 
     assert(thr.log_buf_used <= STO_LOG_BUF_SIZE);
@@ -362,7 +372,8 @@ void Transaction::flush_log_batch() {
     thr.log_stats.bytes += thr.log_buf_used;
     thr.log_stats.bufs++;
 
-    LogSend::enqueue_batch(thr.log_buf, thr.log_buf_used);
+    thr.send_log_buf = thr.log_buf;
+    thr.send_log_buf_used = thr.log_buf_used;
 
 #if STO_DEBUG_TXN_LOG
     std::cout << "Thread " << TThread::id() << " flushed " << thr.log_buf_used << " bytes\n";
@@ -370,6 +381,14 @@ void Transaction::flush_log_batch() {
 
     thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
     thr.log_buf = LogSend::get_buffer();
+}
+
+void Transaction::flush_log_batch() {
+    threadinfo_t& thr = tinfo[TThread::id()];
+    defer_flush_log_batch();
+    LogSend::enqueue_batch(thr.send_log_buf, thr.send_log_buf_used);
+    thr.send_log_buf = nullptr;
+    thr.send_log_buf_used = 0;
 }
 
 void Transaction::update_synced_tid() {
