@@ -250,7 +250,6 @@ private:
 public:
 
     static std::function<void(threadinfo_t::epoch_type)> epoch_advance_callback;
-    static bool log_enable;
     static std::unordered_map<void *, uint64_t> ptr_to_object_id;
     static std::unordered_map<uint64_t, void *> object_id_to_ptr;
 
@@ -308,8 +307,6 @@ public:
 #define TXP_INCREMENT(p) Transaction::txp_account<(p)>(1)
 #define TXP_ACCOUNT(p, n) Transaction::txp_account<(p)>((n))
 
-    static int init_logging(unsigned nthreads, std::vector<std::string> hosts, int start_port);
-    static void stop_logging();
     static void register_object(TObject &obj, uint64_t id) {
       void *ptr = &obj;
       assert(ptr_to_object_id.find(ptr) == ptr_to_object_id.end());
@@ -720,7 +717,6 @@ private:
     void hard_check_opacity(TransItem* item, TransactionTid::type t);
     void stop(bool committed, unsigned* writes, unsigned nwrites);
     void append_log_entry(unsigned* writes, unsigned nwrites);
-    void update_synced_tid();
 
     friend class TransProxy;
     friend class TransItem;

@@ -548,7 +548,7 @@ public:
         write_value_type& v = item.template write_value<write_value_type>();
         e->set_value(v);
     }
-    if (Opacity || Transaction::log_enable)
+    if (Opacity || LogSend::run)
       TransactionTid::set_version(e->version(), t.commit_tid());
     else if (has_insert(item)) {
       Version v = e->version() & ~invalid_bit;

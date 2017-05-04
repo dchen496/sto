@@ -12,16 +12,16 @@ class LogSend {
   };
 
 public:
-  static int create_threads(unsigned nthreads, std::vector<std::string> hosts, int start_port);
+  static int init_logging(unsigned nthreads, std::vector<std::string> hosts, int start_port);
   static void stop();
   static void enqueue_batch(char *buf, int len);
   static char* get_buffer();
   static void set_active(bool active, int thread_id);
+  static volatile bool run;
 
 private:
   static void *sender(void *argsptr);
 
-  static volatile bool run;
 
   struct __attribute__((aligned(128))) SendThread {
     int thread_id;

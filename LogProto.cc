@@ -14,7 +14,8 @@ LogSend::WorkerThread LogSend::worker_threads[MAX_THREADS];
 
 constexpr bool use_cv = true;
 
-int LogSend::create_threads(unsigned nthreads, std::vector<std::string> hosts, int start_port) {
+int LogSend::init_logging(unsigned nthreads, std::vector<std::string> hosts, int start_port) {
+    assert(nthreads <= MAX_THREADS);
     run = true;
     nsend_threads = nthreads;
     for (int i = 0; i < nsend_threads; i++) {
@@ -43,10 +44,20 @@ int LogSend::create_threads(unsigned nthreads, std::vector<std::string> hosts, i
         pthread_create(&thr.handle, nullptr, &sender, (void *) &thr);
     }
     nworker_threads = nthreads;
+
+    for (unsigned i = 0; i < nthreads; i++) {
+        threadinfo_t &thr = Transaction::tinfo[i];
+        thr.log_buf = new char[STO_LOG_BUF_SIZE];
+        thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
+        thr.log_stats = log_stats_t();
+    }
     return 0;
 }
 
 void LogSend::stop() {
+    // XXX could do some smarter synchronization here...
+    usleep(10000);
+
     // stop our own threads
     run = false;
     for (int i = 0; i < nsend_threads; i++) {

@@ -3,6 +3,7 @@
 #include <vector>
 #include <chrono>
 #include "Transaction.hh"
+#include "LogProto.hh"
 #include "TBox.hh"
 
 const int startup_delay = 500000;
@@ -75,7 +76,7 @@ void test_multithreaded(bool enable_logging) {
     for (unsigned i = 0; i < fs.size(); i++)
         Transaction::register_object(fs[i], i);
     if (enable_logging)
-        assert(Transaction::init_logging(nthreads, {backup_host}, start_port) == 0);
+        assert(LogSend::init_logging(nthreads, {backup_host}, start_port) == 0);
 
     std::vector<pthread_t> thrs(nthreads);
     std::vector<ThreadArgs<T>> args(nthreads);
@@ -94,7 +95,7 @@ void test_multithreaded(bool enable_logging) {
     hc::time_point time_end = hc::now();
 
     if (enable_logging)
-        Transaction::stop_logging();
+        LogSend::stop();
     Transaction::clear_registered_objects();
     printf("PRIMARY PASS: %s()\n", __FUNCTION__);
 

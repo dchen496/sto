@@ -4,6 +4,7 @@
 #include <vector>
 #include <map>
 #include "Transaction.hh"
+#include "LogProto.hh"
 #include "TBox.hh"
 #include "MassTrans.hh"
 
@@ -34,7 +35,7 @@ void test_simple_int(int batch) {
     usleep(startup_delay);
     MassTrans<int> f;
     Transaction::register_object(f, 0);
-    assert(Transaction::init_logging(1, {host}, port) == 0);
+    assert(LogSend::init_logging(1, {host}, port) == 0);
 
     // inserts
     for (int i = 0; i < 20; i++) {
@@ -69,7 +70,7 @@ void test_simple_int(int batch) {
         f.transDelete(key1);
     }
     Transaction::flush_log_batch();
-    Transaction::stop_logging();
+    LogSend::stop();
     Transaction::clear_registered_objects();
     printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, batch);
     fflush(stdout);
@@ -88,7 +89,7 @@ void test_many_puts_int() {
     Transaction::register_object(last_key, 3);
     Transaction::register_object(value_hash, 4);
 
-    assert(Transaction::init_logging(1, {host}, port) == 0);
+    assert(LogSend::init_logging(1, {host}, port) == 0);
 
     std::map<std::string, int> m;
     srand(1234);
@@ -119,7 +120,7 @@ void test_many_puts_int() {
     }
     Transaction::flush_log_batch();
 
-    Transaction::stop_logging();
+    LogSend::stop();
     Transaction::clear_registered_objects();
     printf("PRIMARY PASS: %s()\n", __FUNCTION__);
     fflush(stdout);
@@ -139,7 +140,7 @@ void test_many_ops_int() {
     Transaction::register_object(last_key, 3);
     Transaction::register_object(value_hash, 4);
 
-    assert(Transaction::init_logging(1, {host}, port) == 0);
+    assert(LogSend::init_logging(1, {host}, port) == 0);
 
     std::map<std::string, int> m;
     srand(1234);
@@ -179,7 +180,7 @@ void test_many_ops_int() {
     }
     Transaction::flush_log_batch();
 
-    Transaction::stop_logging();
+    LogSend::stop();
     Transaction::clear_registered_objects();
     printf("PRIMARY PASS: %s()\n", __FUNCTION__);
     fflush(stdout);
@@ -189,7 +190,7 @@ void test_simple_string() {
     usleep(startup_delay);
     MassTrans<Masstree::Str, versioned_str_struct> f;
     Transaction::register_object(f, 0);
-    assert(Transaction::init_logging(1, {host}, port) == 0);
+    assert(LogSend::init_logging(1, {host}, port) == 0);
 
     // inserts
     for (int i = 0; i < 20; i++) {
@@ -226,7 +227,7 @@ void test_simple_string() {
     }
 
     Transaction::flush_log_batch();
-    Transaction::stop_logging();
+    LogSend::stop();
     Transaction::clear_registered_objects();
     printf("PRIMARY PASS: %s()\n", __FUNCTION__);
     fflush(stdout);
@@ -236,7 +237,7 @@ void test_string_resize() {
     usleep(startup_delay);
     MassTrans<Masstree::Str, versioned_str_struct> f;
     Transaction::register_object(f, 0);
-    assert(Transaction::init_logging(1, {host}, port) == 0);
+    assert(LogSend::init_logging(1, {host}, port) == 0);
 
     std::string key = "k";
     std::string value = "a";
@@ -252,7 +253,7 @@ void test_string_resize() {
     }
 
     Transaction::flush_log_batch();
-    Transaction::stop_logging();
+    LogSend::stop();
     Transaction::clear_registered_objects();
     printf("PRIMARY PASS: %s()\n", __FUNCTION__);
     fflush(stdout);
@@ -318,7 +319,7 @@ void test_multithreaded_int(bool mostly_inserts) {
     for (int i = 0; i < nthread; i++)
         Transaction::register_object(ntxns[i], 5 + i);
 
-    assert(Transaction::init_logging(nthread, {host}, port) == 0);
+    assert(LogSend::init_logging(nthread, {host}, port) == 0);
 
     pthread_t thrs[nthread];
     ThreadArgs args[nthread];
@@ -373,7 +374,7 @@ void test_multithreaded_int(bool mostly_inserts) {
     }
 
     Transaction::flush_log_batch();
-    Transaction::stop_logging();
+    LogSend::stop();
     Transaction::clear_registered_objects();
     printf("PRIMARY PASS: %s(%d)\n", __FUNCTION__, mostly_inserts);
     fflush(stdout);

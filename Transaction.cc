@@ -11,7 +11,6 @@ Transaction::epoch_state __attribute__((aligned(128))) Transaction::global_epoch
 };
 __thread Transaction *TThread::txn = nullptr;
 std::function<void(threadinfo_t::epoch_type)> Transaction::epoch_advance_callback;
-bool Transaction::log_enable;
 std::unordered_map<void *, uint64_t> Transaction::ptr_to_object_id;
 std::unordered_map<uint64_t, void *> Transaction::object_id_to_ptr;
 
@@ -40,33 +39,6 @@ Transaction::~Transaction() {
     for (unsigned i = 0; i != arraysize(tset_); ++i, live += tset_chunk)
         if (live != tset_[i])
             delete[] tset_[i];
-}
-
-int Transaction::init_logging(unsigned nthreads, std::vector<std::string> hosts, int start_port) {
-   assert(nthreads <= MAX_THREADS);
-
-   log_enable = true;
-
-   if (LogSend::create_threads(nthreads, hosts, start_port))
-      return -1;
-
-   for (unsigned i = 0; i < nthreads; i++) {
-       threadinfo_t &thr = tinfo[i];
-       thr.log_buf = new char[STO_LOG_BUF_SIZE];
-       thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
-       thr.log_stats = log_stats_t();
-   }
-
-   return 0;
-}
-
-void Transaction::stop_logging() {
-    log_enable = false;
-
-    // XXX could do some smarter synchronization, but really this is for debugging
-    usleep(10000);
-
-    LogSend::stop();
 }
 
 void Transaction::refresh_tset_chunk() {
@@ -197,7 +169,7 @@ void Transaction::stop(bool committed, unsigned* writeset, unsigned nwriteset) {
 
     if (committed && !STO_SORT_WRITESET) {
         // log this transaction's writeset to the current thread's log buffer
-        if (log_enable && any_writes_ && committed)
+        if (LogSend::run && any_writes_ && committed)
            append_log_entry(writeset, nwriteset);
 
         for (unsigned* idxit = writeset + nwriteset; idxit != writeset; ) {
@@ -350,15 +322,12 @@ void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
     uint64_t new_used = ptr - thr.log_buf;
     assert(new_used == thr.log_buf_used + size);
     thr.log_buf_used = new_used;
-
-    // update tid
-    update_synced_tid();
-
     thr.log_stats.txns++;
     thr.log_stats.ents += nentries;
 }
 
 // See LogProto.cc for the wire format
+// Necessary since we don't want to actually flush the batch while holding locks
 void Transaction::defer_flush_log_batch() {
     threadinfo_t& thr = tinfo[TThread::id()];
 
@@ -389,9 +358,6 @@ void Transaction::flush_log_batch() {
     LogSend::enqueue_batch(thr.send_log_buf, thr.send_log_buf_used);
     thr.send_log_buf = nullptr;
     thr.send_log_buf_used = 0;
-}
-
-void Transaction::update_synced_tid() {
 }
 
 bool Transaction::try_commit() {
