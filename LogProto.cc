@@ -251,10 +251,14 @@ LogApply::ApplyThread LogApply::apply_threads[MAX_THREADS];
 pthread_t LogApply::advance_thread;
 Transaction::tid_type LogApply::tid_bound = 0; // 0 is lower than any valid TID
 LogApply::ApplyState LogApply::apply_state = ApplyState::IDLE;
+std::function<void(uint64_t)> LogApply::apply_idle_fn;
 
-int LogApply::listen(unsigned nthreads, int start_port, std::function<void()> apply_init_fn) {
+int LogApply::listen(unsigned nthreads, int start_port, std::function<void()> apply_init_fn,
+        std::function<void(uint64_t)> apply_idle_fn) {
+
     tid_bound = 0;
     apply_state = ApplyState::IDLE;
+    LogApply::apply_idle_fn = apply_idle_fn;
     fence();
 
     nrecv_threads = nthreads;
@@ -461,7 +465,7 @@ void *LogApply::applier(void *argsptr) {
         acquire_fence();
         switch (state) {
         case ApplyState::IDLE:
-            // TODO: process some read only transactions
+            apply_idle_fn(tid_bound);
             break;
         case ApplyState::APPLY:
             max_tid = tid_bound;
@@ -514,11 +518,17 @@ void *LogApply::applier(void *argsptr) {
         }
 
         fence();
-        while (apply_state == state) {
+        // don't sleep if we are running read only transactions
+        while (apply_state == state && state != ApplyState::IDLE) {
             usleep(1000);
             fence();
         }
     }
+}
+
+void LogApply::default_apply_idle_fn(uint64_t tid) {
+    (void) tid;
+    usleep(1000);
 }
 
 // returns true if there may still be unprocessed log entries <= max_tid
@@ -547,11 +557,6 @@ char *LogApply::process_txn(char *ptr) {
     std::cout << "TID=" << std::hex << std::setfill('0') << std::setw(8) << tid << ' ';
     std::cout << "N=" << nentries << ' ';
 #endif
-
-    if (tid <= thr.processed_tid) {
-        printf("xd thr %d %lu %lu\n", TThread::id(), tid, thr.processed_tid);
-        fflush(stdout);
-    }
 
     assert(tid > thr.processed_tid);
 

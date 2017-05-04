@@ -60,7 +60,8 @@ class LogApply {
     };
 
 public:
-    static int listen(unsigned nthreads, int start_port, std::function<void()> apply_init_fn = []{});
+    static int listen(unsigned nthreads, int start_port, std::function<void()> apply_init_fn = []{},
+            std::function<void(uint64_t)> apply_idle_fn = default_apply_idle_fn);
     static void stop();
     static void cleanup(std::function<void()> callback);
 
@@ -116,4 +117,6 @@ private:
     static pthread_t advance_thread;
     static Transaction::tid_type tid_bound;
     static ApplyState apply_state;
+    static void default_apply_idle_fn(uint64_t tid);
+    static std::function<void(uint64_t)> apply_idle_fn;
 };
