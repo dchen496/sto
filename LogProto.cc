@@ -313,6 +313,9 @@ int LogApply::listen(unsigned nthreads, int start_port, std::function<void()> ap
     for (int i = 0; i < napply_threads; i++)
         pthread_join(apply_threads[i].handle, nullptr);
 
+    apply_state = ApplyState::IDLE;
+    memory_fence();
+
     // at this point, everyone is done sending
     for (int i = 0; i < nrecv_threads; i++) {
         RecvThread &thr = recv_threads[i];
@@ -325,7 +328,6 @@ int LogApply::listen(unsigned nthreads, int start_port, std::function<void()> ap
 }
 
 void LogApply::stop() {
-    // TODO ?
 }
 
 void *LogApply::receiver(void* argsptr) {
