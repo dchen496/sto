@@ -67,6 +67,15 @@ public:
 
     static uint64_t txns_processed[MAX_THREADS];
 
+    enum ApplyState {
+        IDLE = 0,
+        APPLY,
+        CLEAN,
+        KILL
+    };
+    static ApplyState apply_state;
+    static void default_apply_idle_fn(uint64_t tid);
+
 private:
     static void *receiver(void *argsptr);
     static bool read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatch &batch);
@@ -107,16 +116,7 @@ private:
 
     static int napply_threads;
     static ApplyThread apply_threads[MAX_THREADS];
-
-    enum ApplyState {
-        IDLE = 0,
-        APPLY,
-        CLEAN,
-        KILL
-    };
     static pthread_t advance_thread;
     static Transaction::tid_type tid_bound;
-    static ApplyState apply_state;
-    static void default_apply_idle_fn(uint64_t tid);
     static std::function<void(uint64_t)> apply_idle_fn;
 };

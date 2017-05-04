@@ -626,6 +626,7 @@ public:
     log_op op = (log_op) op8;
     assert(op == log_op::UPDATE || op == log_op::INSERT || op == log_op::DELETE);
 
+
     Str key;
     ptr += Serializer<Str>::deserialize(ptr, key);
 
