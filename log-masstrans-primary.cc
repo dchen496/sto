@@ -66,6 +66,7 @@ void *test_multithreaded_worker(void *argptr) {
 }
 
 void test_multithreaded(bool enable_logging) {
+    num_inserts = 0;
     usleep(startup_delay);
     std::vector<mbta_type> fs(ntrees);
     for (unsigned i = 0; i < fs.size(); i++)
