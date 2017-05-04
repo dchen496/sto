@@ -741,8 +741,6 @@ public:
     bool found = lp.find_locked(*ti.ti);
     bool do_remove = found && (lp.value()->version() & invalid_bit);
     if (do_remove) {
-      std::stringstream ss;
-      std::cerr << ss.str();
       ti.ti->deallocate_rcu(key.mutable_data(), key.length(), memtag_value);
       lp.value()->deallocate_rcu(*ti.ti);
     }
