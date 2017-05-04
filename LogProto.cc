@@ -2,7 +2,9 @@
 #include "LogProto.hh"
 #include "NetUtils.hh"
 #include "Serializer.hh"
+
 #include <deque>
+#include <poll.h>
 
 volatile bool LogSend::run;
 
@@ -101,7 +103,7 @@ void LogSend::enqueue_batch(char *buf, int len) {
     int id = TThread::id();
     SendThread &thr = send_threads[id];
 
-    LogBatch batch = { .buf = buf, .len = len };
+    LogBatch batch = { .max_tid = ((uint64_t *) buf)[1], .buf = buf, .len = len };
 
     {
         std::unique_lock<std::mutex> lk(thr.mu);
@@ -150,6 +152,10 @@ volatile int nsend;
 void *LogSend::sender(void *argsptr) {
     SendThread &thr = *(SendThread *) argsptr;
 
+    std::vector<uint64_t> acked_tids(thr.fds.size());
+
+    std::queue<LogBatch> unacked_batches;
+
     while (true) {
         LogBatch batch;
         bool send_dummy;
@@ -181,10 +187,11 @@ void *LogSend::sender(void *argsptr) {
         if (send_dummy) {
             // Send an empty batch with the highest TID so far
             // Prevents other threads from stalling if this one is inactive.
-            buf[0] = STO_LOG_BATCH_HEADER_SIZE; // length
-            buf[1] = Transaction::get_global_tid(); // max tid
+            batch.max_tid = Transaction::get_global_tid(); // max tid
             batch.buf = (char *) buf;
             batch.len = STO_LOG_BATCH_HEADER_SIZE;
+            buf[0] = STO_LOG_BATCH_HEADER_SIZE; // length
+            buf[1] = batch.max_tid;
         }
 
         for (unsigned i = 0; i < thr.fds.size(); i++) {
@@ -198,11 +205,34 @@ void *LogSend::sender(void *argsptr) {
             // Don't send too many empty batches if we're inactive
             usleep(1000);
         } else {
-            WorkerThread &wthr = worker_threads[thr.thread_id];
-            {
-                std::unique_lock<std::mutex> lk(wthr.mu);
-                wthr.free_queue.push(batch);
+            // We only add real batches to unacked_batches; dummies never need to be resent
+            unacked_batches.push(batch);
+        }
+
+        // poll to see if batches have been acked
+        for (unsigned i = 0; i < thr.fds.size(); i++) {
+            struct pollfd pfd;
+            pfd.fd = thr.fds[i];
+            pfd.events = POLLIN;
+            if (poll(&pfd, 1, 0) > 0 && (pfd.revents & POLLIN)) {
+                if (NetUtils::read_all(pfd.fd, &acked_tids[i], sizeof(acked_tids[i])) < (int) sizeof(acked_tids[i]))
+                    return nullptr;
             }
+        }
+        uint64_t min_acked_tid = acked_tids[0];
+        for (uint64_t tid : acked_tids)
+            min_acked_tid = std::min(min_acked_tid, tid);
+
+        while (!unacked_batches.empty()) {
+            LogBatch &b = unacked_batches.front();
+            if (b.max_tid > min_acked_tid)
+                break;
+            {
+                WorkerThread &wthr = worker_threads[thr.thread_id];
+                std::unique_lock<std::mutex> lk(wthr.mu);
+                wthr.free_queue.push(b);
+            }
+            unacked_batches.pop();
         }
     }
 
@@ -317,6 +347,8 @@ void *LogApply::receiver(void* argsptr) {
         LogBatch batch;
         if (!read_batch(thr.sock_fd, buffer_pool, batch))
             break;
+
+        NetUtils::write_all(thr.sock_fd, (char *) &batch.max_tid, sizeof(batch.max_tid));
 
         {
             ApplyThread &athr = apply_threads[thr.thread_id];

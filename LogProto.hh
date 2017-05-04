@@ -7,6 +7,7 @@
 
 class LogSend {
     struct LogBatch {
+        uint64_t max_tid;
         char *buf;
         int len;
     };
