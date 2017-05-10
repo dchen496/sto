@@ -5,7 +5,7 @@
 #include "compiler.hh"
 #include "masstree-beta/str.hh"
 
-#define USE_UVINT
+#define USE_VARINT
 
 template <typename T, bool simple = mass::is_trivially_copyable<T>::value>
 class Serializer {
@@ -39,7 +39,7 @@ public:
     }
 };
 
-#ifdef USE_UVINT
+#ifdef USE_VARINT
 template<>
 class Serializer<uint64_t, true> {
     static int nbytes(uint64_t obj) {
