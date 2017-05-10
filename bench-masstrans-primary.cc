@@ -8,7 +8,7 @@
 #include "LogProto.hh"
 #include "TBox.hh"
 #include "MassTrans.hh"
-#include "log-masstrans-common.hh"
+#include "bench-masstrans-common.hh"
 
 const int startup_delay = 500000;
 typedef MassTrans<std::string, versioned_str_struct, /* opacity */ false> mbta_type;

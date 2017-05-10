@@ -5,7 +5,7 @@
 #include "LogProto.hh"
 #include "TBox.hh"
 #include "MassTrans.hh"
-#include "log-masstrans-common.hh"
+#include "bench-masstrans-common.hh"
 
 int nthreads;
 int key_size;
