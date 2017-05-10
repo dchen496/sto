@@ -73,6 +73,7 @@ void *init_multithreaded_worker(void *argptr) {
     Sto::start_transaction();
     try {
         valid_keys_boxes[args.id] = init_keys;
+        assert(Sto::try_commit());
     } catch (Transaction::Abort e) {
         assert(false);
     }
@@ -102,7 +103,7 @@ void *test_multithreaded_worker(void *argptr) {
         Sto::start_transaction();
         try {
             // generate one operation type per transaction (so we have true read-only txns)
-            int pct1 = (next_rand(s) >> 16) % 100;
+            int pct1 = next_rand(s) % 100;
             for (int j = 0; j < txn_size; j++) {
                 if (pct1 < insert_pct) {
                     // insert (never cross partition)
@@ -115,13 +116,13 @@ void *test_multithreaded_worker(void *argptr) {
                     inserts++;
                 } else {
                     int partition = args.id;
-                    int pct2 = (next_rand(s) >> 16) % 100;
+                    int pct2 = next_rand(s) % 100;
                     if (pct2 < cross_pct) {
                         // cross partition
-                        partition = (next_rand(s) >> 16) % nthreads;
+                        partition = next_rand(s) % nthreads;
                     }
 
-                    int key = next_rand(s) % valid_keys[partition].v;
+                    int key = next_big_rand(s) % valid_keys[partition].v;
                     acquire_fence();
                     generate_key(partition, key, key_buf);
                     if (pct1 < insert_pct + read_pct) {
@@ -184,6 +185,15 @@ void test_multithreaded(bool enable_logging) {
     }
     for (int i = 0; i < nthreads; i++)
         pthread_join(thrs[i], nullptr);
+
+    // hack to force the backup to apply all entries we've sent it
+    if (enable_logging) {
+      for (int i = 0; i < nthreads; i++)
+        LogSend::set_active(false, i);
+      usleep(10000);
+      for (int i = 0; i < nthreads; i++)
+        LogSend::set_active(true, i);
+    }
 
     printf("starting\n");
     using hc = std::chrono::high_resolution_clock;

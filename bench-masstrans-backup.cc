@@ -43,7 +43,13 @@ void idle_fn(uint64_t tid) {
 
     // wait for initialization
     if (ctx.valid_keys == 0) {
-        ctx.valid_keys = ctx.valid_keys_box.nontrans_read();
+        Sto::start_transaction();
+        try {
+            ctx.valid_keys = ctx.valid_keys_box;
+            assert(Sto::try_commit());
+        } catch (Transaction::Abort e) {
+            assert(false);
+        }
         usleep(1000);
         // good enough...
         ctx.time_start = hc::now();
@@ -64,14 +70,14 @@ void idle_fn(uint64_t tid) {
         Sto::start_transaction();
         try {
             int partition = id;
-            int pct = (next_rand(s) >> 16) % 100;
+            int pct = next_rand(s) % 100;
             if (pct < cross_pct) {
-                partition = (next_rand(s) >> 16) % nthreads;
+                partition = next_rand(s) % nthreads;
                 if (contexts[partition].valid_keys == 0)
                     partition = id;
             }
 
-            int key = next_rand(s) % contexts[partition].valid_keys;
+            int key = next_big_rand(s) % contexts[partition].valid_keys;
             generate_key(partition, key, key_buf);
             assert(ctx.tree->transGet(key_buf, val_buf));
             ctx.reads++;

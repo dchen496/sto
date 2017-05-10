@@ -5,7 +5,11 @@
 
 static inline unsigned next_rand(unsigned &x) {
     x = (x * 1103515245 + 12345) % ((1U<<31) - 1);
-    return x;
+    return x >> 16; // low bits are extremely poor
+}
+
+static inline unsigned next_big_rand(unsigned &x) {
+  return (next_rand(x) << 16) | next_rand(x);
 }
 
 static inline void generate_key(int partition, int key, std::string &buf) {
