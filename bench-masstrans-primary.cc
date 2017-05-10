@@ -12,8 +12,9 @@
 
 const int startup_delay = 500000;
 typedef MassTrans<std::string, versioned_str_struct, /* opacity */ false> mbta_type;
+using hc = std::chrono::high_resolution_clock;
 
-int niters;
+int runtime;
 int init_keys;
 int key_size;
 int val_size;
@@ -33,11 +34,19 @@ static inline unsigned generate_value(unsigned seed, std::string buf) {
   return next_rand(seed);
 }
 
+hc::time_point run_until;
 struct ThreadArgs {
     int id;
     mbta_type *tree;
     bool enable_logging;
-};
+    int txns;
+    int aborts;
+    int reads;
+    int inserts;
+    int updates;
+    int cross_reads;
+    int cross_updates;
+}  __attribute__ ((aligned (128)));
 
 union padded_int {
     int v;
@@ -97,9 +106,7 @@ void *test_multithreaded_worker(void *argptr) {
     next_rand(s);
     int insert_key = init_keys;
 
-    int reads = 0, inserts = 0, updates = 0, cross_reads = 0, cross_updates = 0;
-
-    for (int i = 0; i < niters; i++) {
+    while (true) {
         Sto::start_transaction();
         try {
             // generate one operation type per transaction (so we have true read-only txns)
@@ -113,7 +120,7 @@ void *test_multithreaded_worker(void *argptr) {
                     insert_key++;
                     release_fence();
                     valid_keys[args.id].v = insert_key;
-                    inserts++;
+                    args.inserts++;
                 } else {
                     int partition = args.id;
                     int pct2 = next_rand(s) % 100;
@@ -128,36 +135,42 @@ void *test_multithreaded_worker(void *argptr) {
                     if (pct1 < insert_pct + read_pct) {
                         // read
                         assert(tree.transGet(key_buf, val_buf));
-                        reads++;
+                        args.reads++;
                         if (partition != args.id)
-                            cross_reads++;
+                            args.cross_reads++;
                     } else {
                         // update
                         s = generate_value(s, val_buf);
                         tree.transUpdate(key_buf, val_buf);
-                        updates++;
+                        args.updates++;
                         if (partition != args.id)
-                            cross_updates++;
+                            args.cross_updates++;
                     }
                 }
             }
             Sto::try_commit();
         } catch (Transaction::Abort e) {
+            args.aborts++;
         }
+        args.txns++;
 
-        // occasionally update valid box
-        if (i % 1024 == 0) {
+        // occasionally update valid box and check the time
+        if (args.txns % 1024 == 0) {
             Sto::start_transaction();
             try {
                 valid_keys_boxes[args.id] = valid_keys[args.id].v;
                 Sto::try_commit();
             } catch (Transaction::Abort e) {
+                assert(false);
             }
+            if (hc::now() > run_until)
+                break;
         }
     }
     if (args.enable_logging)
         Transaction::flush_log_batch();
-    printf("thread %d: %d reads, %d inserts, %d updates, %d cross reads, %d cross updates\n", args.id, reads, inserts, updates, cross_reads, cross_updates);
+    printf("thread %d: %d txns, %d aborts, %d reads, %d inserts, %d updates, %d cross reads, %d cross updates\n",
+            args.id, args.txns, args.aborts, args.reads, args.inserts, args.updates, args.cross_reads, args.cross_updates);
     return nullptr;
 }
 
@@ -180,7 +193,10 @@ void test_multithreaded(bool enable_logging) {
 
     printf("initializing\n");
     for (int i = 0; i < nthreads; i++) {
-        args[i] = { .id = i, .tree = &tree, .enable_logging = enable_logging };
+        args[i] = ThreadArgs();
+        args[i].id = i;
+        args[i].tree = &tree;
+        args[i].enable_logging = enable_logging;
         pthread_create(&thrs[i], nullptr, &init_multithreaded_worker, (void *) &args[i]);
 
 #if LOG_CPU_PIN
@@ -203,12 +219,15 @@ void test_multithreaded(bool enable_logging) {
     }
 
     printf("starting\n");
-    using hc = std::chrono::high_resolution_clock;
 
     hc::time_point time_start = hc::now();
+    run_until = time_start + std::chrono::seconds(runtime);
 
     for (int i = 0; i < nthreads; i++) {
-        args[i] = { .id = i, .tree = &tree, .enable_logging = enable_logging };
+        args[i] = ThreadArgs();
+        args[i].id = i;
+        args[i].tree = &tree;
+        args[i].enable_logging = enable_logging;
         pthread_create(&thrs[i], nullptr, &test_multithreaded_worker, (void *) &args[i]);
 
 #if LOG_CPU_PIN
@@ -233,8 +252,8 @@ void test_multithreaded(bool enable_logging) {
     int64_t us = std::chrono::duration_cast<std::chrono::microseconds>(time_end - time_start).count();
     double s = us / 1.0e6;
 
+    log_stats_t agg;
     if (enable_logging) {
-        log_stats_t agg;
         for (int i = 0; i < nthreads; i++) {
             log_stats_t &s = Transaction::tinfo[i].log_stats;
             agg.bytes += s.bytes;
@@ -242,41 +261,74 @@ void test_multithreaded(bool enable_logging) {
             agg.ents += s.ents;
             agg.txns += s.txns;
         }
-        printf("log MB=%.2f bufs=%llu ents=%llu txns=%llu\n", agg.bytes/1.0e6, agg.bufs, agg.ents, agg.txns);
+        printf("log MB=%.2f bufs=%lu ents=%lu txns=%lu\n", agg.bytes/1.0e6, agg.bufs, agg.ents, agg.txns);
         printf("log MB/s=%f bufs/s=%f ents/s=%f txns/s=%f\n",
                 agg.bytes/s/1.0e6, agg.bufs/s, agg.ents/s, agg.txns/s);
         printf("log b/ent=%f b/txn=%f\n", (double)agg.bytes/agg.ents, (double)agg.bytes/agg.txns);
     }
 
-    printf("s=%f txns=%d txns/s=%f\n", s, niters * nthreads, niters * nthreads / s);
+    int txns = 0, aborts = 0, reads = 0, inserts = 0, updates = 0, cross_reads = 0, cross_updates = 0;
+    for (int i = 0; i < nthreads; i++) {
+        txns += args[i].txns;
+        aborts += args[i].aborts;
+        reads += args[i].reads;
+        inserts += args[i].inserts;
+        updates += args[i].updates;
+        cross_reads += args[i].cross_reads;
+        cross_updates += args[i].cross_updates;
+    }
+    printf("s=%f txns=%d txns/s=%f aborts=%d aborts/s=%f\n", s, txns, txns / s, aborts, aborts / s);
+    printf("reads=%d reads/s=%f cross_reads=%d cross_reads/s=%f\n", reads, reads / s, cross_reads, cross_reads / s);
+    printf("inserts=%d inserts/s=%f updates=%d updates/s=%f cross_updates=%d cross_updates/s=%f\n",
+            inserts, inserts/s, updates, updates / s, cross_updates, cross_updates / s);
+
+    // csv-formatted
+    printf("!H runtime,init_keys,key_size,val_size,txn_size,read_pct,insert_pct,update_pct,cross_pct,nthreads"
+            ",s,txns,txns/s,aborts,aborts/s,reads,reads/s,cross_reads,cross_reads/s"
+            ",inserts,inserts/s,updates,updates/s,cross_updates,cross_updates/s");
+    if (enable_logging)
+        printf(",MB,MB/s,bufs,bufs/s,ents,ents/s,txns,txns/s,b/ent,b/txn");
+    printf("\n");
+
+    printf("!V %d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%f,%d,%f,%d,%f,%d,%f,%d,%f,%d,%f,%d,%f,%d,%f",
+            runtime,init_keys,key_size,val_size,txn_size,read_pct,insert_pct,update_pct,cross_pct,nthreads,
+            s, txns, txns/s, aborts, aborts/s, reads, reads/s, cross_reads, cross_reads/s,
+            inserts, inserts/s, updates, updates/s, cross_updates, cross_updates/s);
+    if (enable_logging) {
+        printf(",%f,%f,%lu,%f,%lu,%f,%lu,%f,%f,%f",
+            agg.bytes/1.0e6, agg.bytes/s/1.0e6, agg.bufs, agg.bufs/s,
+            agg.ents, agg.ents/s, agg.txns, agg.txns/s,
+            (double)agg.bytes/agg.ents, (double)agg.bytes/agg.txns);
+    }
+    printf("\n");
     fflush(stdout);
 }
 
 int main(int argc, char **argv) {
     if (argc != 13) {
-        printf("usage: log-masstrans-primary niters init_keys key_size val_size txn_size read%% insert%% update%% cross%% nthreads backup_host start_port\n");
+        printf("usage: bench-masstrans-primary runtime init_keys key_size val_size txn_size read%% insert%% update%% cross%% nthreads backup_host start_port\n");
         return -1;
     }
 
     char **arg = &argv[1];
-    niters = atoi(*arg++);
-    printf("niters: %d\n", niters);
+    runtime = atoi(*arg++);
+    printf("runtime: %d, ", runtime);
     init_keys = atoi(*arg++);
-    printf("init_keys: %d\n", init_keys);
+    printf("init_keys: %d, ", init_keys);
     key_size = atoi(*arg++);
-    printf("key_size: %d\n", key_size);
+    printf("key_size: %d, ", key_size);
     val_size = atoi(*arg++);
-    printf("val_size: %d\n", val_size);
+    printf("val_size: %d, ", val_size);
     txn_size = atoi(*arg++);
-    printf("txn_size: %d\n", txn_size);
+    printf("txn_size: %d, ", txn_size);
     read_pct = atoi(*arg++);
-    printf("read_pct: %d\n", read_pct);
+    printf("read_pct: %d, ", read_pct);
     insert_pct = atoi(*arg++);
-    printf("insert_pct: %d\n", insert_pct);
+    printf("insert_pct: %d, ", insert_pct);
     update_pct = atoi(*arg++);
-    printf("update_pct: %d\n", update_pct);
+    printf("update_pct: %d, ", update_pct);
     cross_pct = atoi(*arg++);
-    printf("cross_pct: %d\n", cross_pct);
+    printf("cross_pct: %d, ", cross_pct);
     nthreads = atoi(*arg++);
     printf("nthreads: %d\n", nthreads);
     backup_host = std::string(*arg++);

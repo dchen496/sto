@@ -124,16 +124,16 @@ void test_multithreaded() {
 
 int main(int argc, char **argv) {
     if (argc != 7) {
-        printf("usage: log-masstrans-backup nthreads key_size val_size txn_size cross%% start_port\n");
+        printf("usage: bench-masstrans-backup key_size val_size txn_size cross%% nthreads start_port\n");
         return -1;
     }
 
     char **arg = &argv[1];
-    nthreads = atoi(*arg++);
     key_size = atoi(*arg++);
     val_size = atoi(*arg++);
     txn_size = atoi(*arg++);
     cross_pct = atoi(*arg++);
+    nthreads = atoi(*arg++);
     start_port = atoi(*arg++);
 
     if (!validate_pct(cross_pct)) {
