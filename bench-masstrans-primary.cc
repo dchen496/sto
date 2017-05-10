@@ -182,6 +182,13 @@ void test_multithreaded(bool enable_logging) {
     for (int i = 0; i < nthreads; i++) {
         args[i] = { .id = i, .tree = &tree, .enable_logging = enable_logging };
         pthread_create(&thrs[i], nullptr, &init_multithreaded_worker, (void *) &args[i]);
+
+#if LOG_CPU_PIN
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(i + LOG_CPU_PIN, &cpuset);
+        pthread_setaffinity_np(thrs[i], sizeof(cpu_set_t), &cpuset);
+#endif
     }
     for (int i = 0; i < nthreads; i++)
         pthread_join(thrs[i], nullptr);
@@ -203,6 +210,13 @@ void test_multithreaded(bool enable_logging) {
     for (int i = 0; i < nthreads; i++) {
         args[i] = { .id = i, .tree = &tree, .enable_logging = enable_logging };
         pthread_create(&thrs[i], nullptr, &test_multithreaded_worker, (void *) &args[i]);
+
+#if LOG_CPU_PIN
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(i + LOG_CPU_PIN, &cpuset);
+        pthread_setaffinity_np(thrs[i], sizeof(cpu_set_t), &cpuset);
+#endif
     }
     for (int i = 0; i < nthreads; i++)
         pthread_join(thrs[i], nullptr);

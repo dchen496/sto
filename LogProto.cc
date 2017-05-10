@@ -6,10 +6,6 @@
 #include <deque>
 #include <poll.h>
 
-// typically set to number of cores in the first socket (assuming NIC is attached to that socket)
-#define CPU_PIN 0
-//#define CPU_PIN 8
-
 volatile bool LogSend::run;
 
 int LogSend::nsend_threads;
@@ -49,10 +45,10 @@ int LogSend::init_logging(unsigned nthreads, std::vector<std::string> hosts, int
 
         pthread_create(&thr.handle, nullptr, &sender, (void *) &thr);
 
-#if CPU_PIN
+#if LOG_CPU_PIN
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
-        CPU_SET(i % CPU_PIN, &cpuset);
+        CPU_SET(i % LOG_CPU_PIN, &cpuset);
         pthread_setaffinity_np(thr.handle, sizeof(cpu_set_t), &cpuset);
 #endif
     }
@@ -301,10 +297,10 @@ int LogApply::listen(unsigned nthreads, int start_port, std::function<void()> ap
         }
         pthread_create(&thr.handle, nullptr, &receiver, (void *) &thr);
 
-#if CPU_PIN
+#if LOG_CPU_PIN
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
-        CPU_SET(i % CPU_PIN, &cpuset);
+        CPU_SET(i % LOG_CPU_PIN, &cpuset);
         pthread_setaffinity_np(thr.handle, sizeof(cpu_set_t), &cpuset);
 #endif
     }
@@ -320,10 +316,10 @@ int LogApply::listen(unsigned nthreads, int start_port, std::function<void()> ap
         txns_processed[i] = 0;
         pthread_create(&thr.handle, nullptr, &applier, (void *) &thr);
 
-#if CPU_PIN
+#if LOG_CPU_PIN
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
-        CPU_SET(i + CPU_PIN, &cpuset);
+        CPU_SET(i + LOG_CPU_PIN, &cpuset);
         pthread_setaffinity_np(thr.handle, sizeof(cpu_set_t), &cpuset);
 #endif
     }

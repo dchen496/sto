@@ -5,6 +5,10 @@
 #include <mutex>
 #include <condition_variable>
 
+// typically set to number of cores in the first socket (assuming NIC is attached to that socket)
+#define LOG_CPU_PIN 0
+//#define LOG_CPU_PIN 8
+
 class LogSend {
     struct LogBatch {
         uint64_t max_tid;
