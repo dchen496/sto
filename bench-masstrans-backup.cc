@@ -66,28 +66,28 @@ void idle_fn(uint64_t tid) {
     val_buf.resize(val_size);
 
     unsigned &s = ctx.s;
-    for (int i = 0; i < txn_size; i++) {
-        Sto::start_transaction();
-        try {
-            int partition = id;
-            int pct = next_rand(s) % 100;
-            if (pct < cross_pct) {
-                partition = next_rand(s) % nthreads;
-                if (contexts[partition].valid_keys == 0)
-                    partition = id;
-            }
+    Sto::start_transaction();
+    try {
+        for (int i = 0; i < txn_size; i++) {
+                int partition = id;
+                int pct = next_rand(s) % 100;
+                if (pct < cross_pct) {
+                    partition = next_rand(s) % nthreads;
+                    if (contexts[partition].valid_keys == 0)
+                        partition = id;
+                }
 
-            int key = next_big_rand(s) % contexts[partition].valid_keys;
-            generate_key(partition, key, key_buf);
-            assert(ctx.tree->transGet(key_buf, val_buf));
-            ctx.reads++;
-            if (partition != id) {
-                ctx.cross_reads++;
-            }
-            Sto::try_commit();
-        } catch (Transaction::Abort e) {
-            assert(false);
+                int key = next_big_rand(s) % contexts[partition].valid_keys;
+                generate_key(partition, key, key_buf);
+                assert(ctx.tree->transGet(key_buf, val_buf));
+                ctx.reads++;
+                if (partition != id) {
+                    ctx.cross_reads++;
+                }
         }
+        Sto::try_commit();
+    } catch (Transaction::Abort e) {
+        assert(false);
     }
     ctx.iter++;
 }
