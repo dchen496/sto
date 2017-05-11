@@ -26,6 +26,8 @@ struct idle_ctx {
     TBox<int> valid_keys_box;
     hc::time_point time_start;
     mbta_type *tree;
+    std::string key_buf;
+    std::string val_buf;
 } __attribute__ ((aligned (128)));
 
 std::vector<idle_ctx> contexts;
@@ -40,12 +42,21 @@ void idle_fn(uint64_t tid) {
     (void) tid;
     int id = TThread::id();
     idle_ctx &ctx = contexts[id];
+    unsigned &s = ctx.s;
+    mbta_type &tree = *(ctx.tree);
 
     // wait for initialization
     if (ctx.valid_keys == 0) {
         Sto::start_transaction();
         try {
-            ctx.valid_keys = ctx.valid_keys_box;
+            // we want all threads to start at the same time, so check everyone's boxes
+            bool good = true;
+            for (int i = 0; i < nthreads; i++) {
+                if (contexts[i].valid_keys_box == 0)
+                    good = false;
+            }
+            if (good)
+                ctx.valid_keys = ctx.valid_keys_box;
             assert(Sto::try_commit());
         } catch (Transaction::Abort e) {
             assert(false);
@@ -60,26 +71,18 @@ void idle_fn(uint64_t tid) {
     if (ctx.txns % 1024 == 0)
         ctx.valid_keys = ctx.valid_keys_box.nontrans_read();
 
-    std::string key_buf;
-    key_buf.resize(key_size);
-    std::string val_buf;
-    val_buf.resize(val_size);
-
-    unsigned &s = ctx.s;
     Sto::start_transaction();
     try {
         for (int i = 0; i < txn_size; i++) {
                 int partition = id;
                 int pct = next_rand(s) % 100;
-                if (pct < cross_pct) {
+                if (pct < cross_pct)
                     partition = next_rand(s) % nthreads;
-                    if (contexts[partition].valid_keys == 0)
-                        partition = id;
-                }
 
                 int key = next_big_rand(s) % contexts[partition].valid_keys;
-                generate_key(partition, key, key_buf);
-                assert(ctx.tree->transGet(key_buf, val_buf));
+                generate_key(partition, key, ctx.key_buf);
+                acquire_fence();
+                assert(tree.transGet(ctx.key_buf, ctx.val_buf));
                 ctx.reads++;
                 if (partition != id) {
                     ctx.cross_reads++;
@@ -87,7 +90,7 @@ void idle_fn(uint64_t tid) {
         }
         Sto::try_commit();
     } catch (Transaction::Abort e) {
-        assert(false);
+        printf("warning: read-only transaction aborted!\n");
     }
     ctx.txns++;
 }
@@ -103,6 +106,8 @@ void test_multithreaded() {
         contexts[i].tree = &tree;
         contexts[i].time_start = hc::now();
         contexts[i].s = i;
+        contexts[i].key_buf.resize(key_size);
+        contexts[i].val_buf.resize(val_size);
         Transaction::register_object(contexts[i].valid_keys_box, i + 1);
     }
     assert(LogApply::listen(nthreads, start_port, thread_init_obj, idle_fn_obj) == 0);
