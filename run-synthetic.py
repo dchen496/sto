@@ -44,12 +44,17 @@ def main():
     c['backup_host'] = '192.168.0.6'
     c['start_port'] = 2000
 
+    skip = True
     for read_pct in [0, 10, 50, 75, 90, 100]:
         rem = 100 - read_pct
         for p in sorted(set([0, rem * 0.25, rem * 0.5, rem * 0.75, rem])):
             update_pct = int(p)
             insert_pct = rem - update_pct
             for nthreads in [8, 16, 24, 32]:
+                if read_pct == 0 and insert_pct == 100 and update_pct == 0 and nthreads == 8:
+                    skip = False
+                if skip:
+                    continue
                 print read_pct, insert_pct, update_pct, nthreads
                 c['read_pct'] = read_pct
                 c['insert_pct'] = insert_pct
