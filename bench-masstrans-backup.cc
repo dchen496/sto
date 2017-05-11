@@ -18,7 +18,7 @@ typedef MassTrans<std::string, versioned_str_struct, /*opacity*/ false> mbta_typ
 using hc = std::chrono::system_clock;
 
 struct idle_ctx {
-    int iter;
+    int txns;
     int reads;
     int cross_reads;
     int valid_keys;
@@ -57,7 +57,7 @@ void idle_fn(uint64_t tid) {
     }
 
     // periodically update valid keys
-    if (ctx.iter % 1024 == 0)
+    if (ctx.txns % 1024 == 0)
         ctx.valid_keys = ctx.valid_keys_box.nontrans_read();
 
     std::string key_buf;
@@ -89,7 +89,7 @@ void idle_fn(uint64_t tid) {
     } catch (Transaction::Abort e) {
         assert(false);
     }
-    ctx.iter++;
+    ctx.txns++;
 }
 
 auto idle_fn_obj = std::function<void(uint64_t)>(&idle_fn);
@@ -111,14 +111,19 @@ void test_multithreaded() {
 
     int64_t us = std::chrono::duration_cast<std::chrono::microseconds>(time_end - contexts[0].time_start).count();
     double s = us / 1.0e6;
-    int total_reads = 0;
+    int txns = 0, reads = 0, cross_reads = 0;
     for (int i = 0; i < nthreads; i++) {
         idle_ctx &ctx = contexts[i];
-        printf("thread %d: %d reads, %d cross reads\n", i, ctx.reads, ctx.cross_reads);
-        total_reads += ctx.reads;
+        printf("thread %d: %d txns, %d reads, %d cross reads\n", i, ctx.txns, ctx.reads, ctx.cross_reads);
+        txns += ctx.txns;
+        reads += ctx.reads;
+        cross_reads += ctx.cross_reads;
     }
 
-    printf("s=%f reads=%d reads/s=%f\n", s, total_reads, total_reads / s);
+    printf("s=%f txns=%d txns/s=%f reads=%d reads/s=%f, cross_reads=%d, cross_reads/s=%f\n", s, txns, txns/s, reads, reads / s, cross_reads, cross_reads/s);
+    printf("!H backup_cross_pct,backup_s,backup_txns,backup_txns/s,backup_reads,backup_reads/s,backup_cross_reads,backup_cross_reads/s\n");
+    printf("!V %d,%f,%d,%f,%d,%f,%d,%f\n",
+            cross_pct, s, txns, txns/s, reads, reads / s, cross_reads, cross_reads/s);
     fflush(stdout);
 }
 
