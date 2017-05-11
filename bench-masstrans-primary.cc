@@ -210,10 +210,11 @@ void test_multithreaded(bool enable_logging) {
         pthread_join(thrs[i], nullptr);
 
     // hack to force the backup to apply all entries we've sent it
+    // also gives it some time to catch up if it's a batch or two behind
     if (enable_logging) {
       for (int i = 0; i < nthreads; i++)
         LogSend::set_active(false, i);
-      usleep(10000);
+      usleep(100000);
       for (int i = 0; i < nthreads; i++)
         LogSend::set_active(true, i);
     }

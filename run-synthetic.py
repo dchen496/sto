@@ -37,7 +37,7 @@ def main():
     c['init_keys'] = 1000000
     c['key_size'] = 16
     c['val_size'] = 64
-    c['txn_size'] = 10
+    c['txn_size'] = 100
     c['backup_txn_size'] = 10
     c['cross_pct'] = 10
     c['backup_cross_pct'] = 10
