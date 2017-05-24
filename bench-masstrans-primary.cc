@@ -10,7 +10,7 @@
 #include "MassTrans.hh"
 #include "bench-masstrans-common.hh"
 
-const int startup_delay = 500000;
+const int startup_delay = 2000000;
 typedef MassTrans<std::string, versioned_str_struct, /* opacity */ false> mbta_type;
 using hc = std::chrono::high_resolution_clock;
 
@@ -67,17 +67,20 @@ void *init_multithreaded_worker(void *argptr) {
     val_buf.resize(val_size);
 
     unsigned s = args.id;
-    for (int i = 0; i < init_keys; i++) {
-        Sto::start_transaction();
+    for (int j = 0; j < init_keys; j += 100) {
         try {
-            generate_key(args.id, i, key_buf);
-            s = generate_value(s, val_buf);
-            tree.transInsert(key_buf, val_buf);
+            Sto::start_transaction();
+            for (int i = j; i < init_keys && i < j + 100; i++) {
+                generate_key(args.id, i, key_buf);
+                s = generate_value(s, val_buf);
+                tree.transInsert(key_buf, val_buf);
+            }
             assert(Sto::try_commit());
         } catch (Transaction::Abort e) {
             assert(false);
         }
     }
+
     valid_keys[args.id].v = init_keys;
     Sto::start_transaction();
     try {
