@@ -115,7 +115,11 @@ public:
     static int deserialize(const char *buf, std::string &dst) {
         uint64_t len;
         buf += Serializer<uint64_t>::deserialize(buf, len);
-        dst = std::string(buf, buf + len);
+        // expect that dst is preallocated
+        dst.resize(len);
+        for (int i = 0; i < len; i++)
+            dst[i] = buf[i];
+        // dst = std::string(buf, buf + len);
         return size(dst);
     }
 };
