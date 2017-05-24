@@ -630,7 +630,8 @@ public:
     Str key;
     ptr += Serializer<Str>::deserialize(ptr, key);
 
-    V value;
+    // don't reallocate this over and over (in case it's std::string)
+    thread_local V value;
     if (op != log_op::DELETE) {
       ptr += Serializer<V>::deserialize(ptr, value);
     }
@@ -659,8 +660,7 @@ public:
       char *keybuf = (char *) malloc(key.length());
       memcpy(keybuf, key.data(), key.length());
       version_key_type vk = { .vers = log_tid | invalid_bit, .key = Str(keybuf, key.length()) };
-      V dummy = V();
-      versioned_value *val = (versioned_value*) versioned_value::make(std::move(dummy), vk);
+      versioned_value *val = (versioned_value*) versioned_value::make(V(), vk);
       lp.value() = val;
       Str key_copy = val->key();
       LogApply::cleanup([=](){ remove_key_if_invalid(key_copy); });
@@ -728,8 +728,8 @@ public:
 
     char *keybuf = (char *) malloc(key.length());
     memcpy(keybuf, key.data(), key.length());
-    version_key_type vk = { .vers = log_tid, .key = Str(keybuf, key.length()) };
-    versioned_value *val = (versioned_value *) versioned_value::make(std::move(value), vk);
+    version_key_type vk = { .vers = log_tid, .key = Str((char *) keybuf, key.length()) };
+    versioned_value *val = (versioned_value *) versioned_value::make(value, vk);
     lp.value() = val;
     lp.finish(1, *ti.ti);
     return true;
