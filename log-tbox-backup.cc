@@ -16,7 +16,7 @@ void test_multithreaded() {
     std::vector<TBox<T>> fs(nthreads * txnsize);
     for (unsigned i = 0; i < fs.size(); i++)
         Transaction::register_object(fs[i], i);
-    assert(LogApply::listen(nthreads, start_port) == 0);
+    assert(LogBackup::listen(nthreads, start_port) == 0);
 
     Transaction::clear_registered_objects();
     printf("BACKUP PASS: %s()\n", __FUNCTION__);

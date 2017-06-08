@@ -63,7 +63,7 @@ std::map<std::string, V> copy_to_map(T mt, std::string start, std::string end) {
 void test_simple_int(int batch) {
     MassTrans<int> f;
     Transaction::register_object(f, 0);
-    assert(LogApply::listen(1, port, thread_init_obj) == 0);
+    assert(LogBackup::listen(1, port, thread_init_obj) == 0);
 
     {
         bool found;
@@ -112,7 +112,7 @@ void test_many_puts_int() {
     Transaction::register_object(last_key, 3);
     Transaction::register_object(value_hash, 4);
 
-    assert(LogApply::listen(1, port, thread_init_obj) == 0);
+    assert(LogBackup::listen(1, port, thread_init_obj) == 0);
 
     std::map<std::string, int> m1 = copy_to_map<int>(f,
             first_key.nontrans_read(), last_key.nontrans_read());
@@ -148,7 +148,7 @@ void test_many_ops_int() {
     Transaction::register_object(last_key, 3);
     Transaction::register_object(value_hash, 4);
 
-    assert(LogApply::listen(1, port, thread_init_obj) == 0);
+    assert(LogBackup::listen(1, port, thread_init_obj) == 0);
 
     std::map<std::string, int> m1 = copy_to_map<int>(f,
             first_key.nontrans_read(), last_key.nontrans_read());
@@ -177,7 +177,7 @@ void test_many_ops_int() {
 void test_simple_string() {
     MassTrans<Masstree::Str, versioned_str_struct> f;
     Transaction::register_object(f, 0);
-    assert(LogApply::listen(1, port, thread_init_obj) == 0);
+    assert(LogBackup::listen(1, port, thread_init_obj) == 0);
 
     bool found;
     {
@@ -205,7 +205,7 @@ void test_simple_string() {
 void test_string_resize() {
     MassTrans<Masstree::Str, versioned_str_struct> f;
     Transaction::register_object(f, 0);
-    assert(LogApply::listen(1, port, thread_init_obj) == 0);
+    assert(LogBackup::listen(1, port, thread_init_obj) == 0);
 
     std::string value;
     bool found;
@@ -242,7 +242,7 @@ void test_multithreaded_int(bool mostly_inserts) {
     for (int i = 0; i < nthread; i++)
         Transaction::register_object(ntxns[i], 5 + i);
 
-    assert(LogApply::listen(nthread, port, thread_init_obj) == 0);
+    assert(LogBackup::listen(nthread, port, thread_init_obj) == 0);
 
     std::map<std::string, int> m1 = copy_to_map<int>(f,
             first_key.nontrans_read(), last_key.nontrans_read());

@@ -548,7 +548,7 @@ public:
         write_value_type& v = item.template write_value<write_value_type>();
         e->set_value(v);
     }
-    if (Opacity || LogSend::run)
+    if (Opacity || LogPrimary::run)
       TransactionTid::set_version(e->version(), t.commit_tid());
     else if (has_insert(item)) {
       Version v = e->version() & ~invalid_bit;
@@ -648,7 +648,7 @@ public:
           assert(!(val->version() & resized_bit)); // should never happen since we used a locked cursor
           TransactionTid::set_version(val->version(), log_tid | invalid_bit);
           Str key_copy = val->key();
-          LogApply::cleanup([=](){ remove_key_if_invalid(key_copy); });
+          LogBackup::cleanup([=](){ remove_key_if_invalid(key_copy); });
           unlock(val);
         }
         lp.finish(0, *ti.ti);
@@ -663,7 +663,7 @@ public:
       versioned_value *val = (versioned_value*) versioned_value::make(V(), vk);
       lp.value() = val;
       Str key_copy = val->key();
-      LogApply::cleanup([=](){ remove_key_if_invalid(key_copy); });
+      LogBackup::cleanup([=](){ remove_key_if_invalid(key_copy); });
       lp.finish(1, *ti.ti);
       return true;
     }

@@ -117,9 +117,8 @@ public:
         buf += Serializer<uint64_t>::deserialize(buf, len);
         // expect that dst is preallocated
         dst.resize(len);
-        for (int i = 0; i < len; i++)
+        for (unsigned i = 0; i < len; i++)
             dst[i] = buf[i];
-        // dst = std::string(buf, buf + len);
         return size(dst);
     }
 };

@@ -76,7 +76,7 @@ void test_multithreaded(bool enable_logging) {
     for (unsigned i = 0; i < fs.size(); i++)
         Transaction::register_object(fs[i], i);
     if (enable_logging)
-        assert(LogSend::init_logging(nthreads, {backup_host}, start_port) == 0);
+        assert(LogPrimary::init_logging(nthreads, {backup_host}, start_port) == 0);
 
     std::vector<pthread_t> thrs(nthreads);
     std::vector<ThreadArgs<T>> args(nthreads);
@@ -95,7 +95,7 @@ void test_multithreaded(bool enable_logging) {
     hc::time_point time_end = hc::now();
 
     if (enable_logging)
-        LogSend::stop();
+        LogPrimary::stop();
     Transaction::clear_registered_objects();
     printf("PRIMARY PASS: %s()\n", __FUNCTION__);
 

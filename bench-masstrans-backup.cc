@@ -110,7 +110,7 @@ void test_multithreaded() {
         contexts[i].val_buf.resize(val_size);
         Transaction::register_object(contexts[i].valid_keys_box, i + 1);
     }
-    assert(LogApply::listen(nthreads, start_port, thread_init_obj, idle_fn_obj) == 0);
+    assert(LogBackup::listen(nthreads, start_port, thread_init_obj, idle_fn_obj) == 0);
     Transaction::clear_registered_objects();
     hc::time_point time_end = hc::now();
 

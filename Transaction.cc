@@ -169,8 +169,8 @@ void Transaction::stop(bool committed, unsigned* writeset, unsigned nwriteset) {
 
     if (committed && !STO_SORT_WRITESET) {
         // log this transaction's writeset to the current thread's log buffer
-        if (LogSend::run && any_writes_ && committed)
-           append_log_entry(writeset, nwriteset);
+        if (LogPrimary::run && any_writes_ && committed)
+           append_log_record(writeset, nwriteset);
 
         for (unsigned* idxit = writeset + nwriteset; idxit != writeset; ) {
             --idxit;
@@ -218,13 +218,13 @@ after_unlock:
     state_ = s_aborted + committed;
 
     if (thr.send_log_buf != nullptr) {
-        LogSend::enqueue_batch(thr.send_log_buf, thr.send_log_buf_used);
+        LogPrimary::enqueue_batch(thr.send_log_buf, thr.send_log_buf_used);
         thr.send_log_buf = nullptr;
         thr.send_log_buf_used = 0;
     }
 }
 
-void Transaction::append_log_entry(unsigned* writeset, unsigned nwriteset) {
+void Transaction::append_log_record(unsigned* writeset, unsigned nwriteset) {
     threadinfo_t& thr = tinfo[TThread::id()];
 
     // XXX fix this
@@ -349,13 +349,13 @@ void Transaction::defer_flush_log_batch() {
 #endif
 
     thr.log_buf_used = STO_LOG_BATCH_HEADER_SIZE;
-    thr.log_buf = LogSend::get_buffer();
+    thr.log_buf = LogPrimary::get_buffer();
 }
 
 void Transaction::flush_log_batch() {
     threadinfo_t& thr = tinfo[TThread::id()];
     defer_flush_log_batch();
-    LogSend::enqueue_batch(thr.send_log_buf, thr.send_log_buf_used);
+    LogPrimary::enqueue_batch(thr.send_log_buf, thr.send_log_buf_used);
     thr.send_log_buf = nullptr;
     thr.send_log_buf_used = 0;
 }

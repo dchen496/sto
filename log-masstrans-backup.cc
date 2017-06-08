@@ -22,7 +22,7 @@ void test_multithreaded() {
     std::vector<mbta_type> fs(ntrees);
     for (unsigned i = 0; i < fs.size(); i++)
         Transaction::register_object(fs[i], i);
-    assert(LogApply::listen(nthreads, start_port, thread_init_obj) == 0);
+    assert(LogBackup::listen(nthreads, start_port, thread_init_obj) == 0);
 
     Transaction::clear_registered_objects();
     printf("BACKUP PASS: %s()\n", __FUNCTION__);

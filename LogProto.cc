@@ -6,17 +6,17 @@
 #include <deque>
 #include <poll.h>
 
-volatile bool LogSend::run;
+volatile bool LogPrimary::run;
 
-int LogSend::nsend_threads;
-LogSend::SendThread LogSend::send_threads[MAX_THREADS];
+int LogPrimary::nsend_threads;
+LogPrimary::SendThread LogPrimary::send_threads[MAX_THREADS];
 
-int LogSend::nworker_threads;
-LogSend::WorkerThread LogSend::worker_threads[MAX_THREADS];
+int LogPrimary::nworker_threads;
+LogPrimary::WorkerThread LogPrimary::worker_threads[MAX_THREADS];
 
 constexpr bool use_cv = true;
 
-int LogSend::init_logging(unsigned nthreads, std::vector<std::string> hosts, int start_port) {
+int LogPrimary::init_logging(unsigned nthreads, std::vector<std::string> hosts, int start_port) {
     assert(nthreads <= MAX_THREADS);
     run = true;
     nsend_threads = nthreads;
@@ -63,7 +63,7 @@ int LogSend::init_logging(unsigned nthreads, std::vector<std::string> hosts, int
     return 0;
 }
 
-void LogSend::stop() {
+void LogPrimary::stop() {
     // XXX could do some smarter synchronization here...
     usleep(10000);
 
@@ -106,7 +106,7 @@ void LogSend::stop() {
     }
 }
 
-void LogSend::enqueue_batch(char *buf, int len) {
+void LogPrimary::enqueue_batch(char *buf, int len) {
     int id = TThread::id();
     SendThread &thr = send_threads[id];
 
@@ -131,7 +131,7 @@ void LogSend::enqueue_batch(char *buf, int len) {
     }
 }
 
-char *LogSend::get_buffer() {
+char *LogPrimary::get_buffer() {
     WorkerThread &thr = worker_threads[TThread::id()];
     char *ret = nullptr;
     {
@@ -147,7 +147,7 @@ char *LogSend::get_buffer() {
 }
 
 // the log batch must be flushed before disabling a thread!
-void LogSend::set_active(bool active, int thread_id) {
+void LogPrimary::set_active(bool active, int thread_id) {
     SendThread &thr = send_threads[thread_id];
     std::unique_lock<std::mutex> lk(thr.mu);
     thr.active = active;
@@ -156,7 +156,7 @@ void LogSend::set_active(bool active, int thread_id) {
 }
 
 volatile int nsend;
-void *LogSend::sender(void *argsptr) {
+void *LogPrimary::sender(void *argsptr) {
     SendThread &thr = *(SendThread *) argsptr;
 
     std::vector<uint64_t> acked_tids(thr.fds.size());
@@ -247,25 +247,25 @@ void *LogSend::sender(void *argsptr) {
 }
 
 
-uint64_t LogApply::txns_processed[MAX_THREADS];
+uint64_t LogBackup::txns_processed[MAX_THREADS];
 
-int LogApply::nrecv_threads;
-LogApply::RecvThread LogApply::recv_threads[MAX_THREADS];
+int LogBackup::nrecv_threads;
+LogBackup::RecvThread LogBackup::recv_threads[MAX_THREADS];
 
-int LogApply::napply_threads;
-LogApply::ApplyThread LogApply::apply_threads[MAX_THREADS];
+int LogBackup::napply_threads;
+LogBackup::ApplyThread LogBackup::apply_threads[MAX_THREADS];
 
-pthread_t LogApply::advance_thread;
-Transaction::tid_type LogApply::tid_bound = 0; // 0 is lower than any valid TID
-LogApply::ApplyState LogApply::apply_state = ApplyState::IDLE;
-std::function<void(uint64_t)> LogApply::apply_idle_fn;
+pthread_t LogBackup::advance_thread;
+Transaction::tid_type LogBackup::tid_bound = 0; // 0 is lower than any valid TID
+LogBackup::ApplyState LogBackup::apply_state = ApplyState::IDLE;
+std::function<void(uint64_t)> LogBackup::apply_idle_fn;
 
-int LogApply::listen(unsigned nthreads, int start_port, std::function<void()> apply_init_fn,
+int LogBackup::listen(unsigned nthreads, int start_port, std::function<void()> apply_init_fn,
         std::function<void(uint64_t)> apply_idle_fn) {
 
     tid_bound = 0;
     apply_state = ApplyState::IDLE;
-    LogApply::apply_idle_fn = apply_idle_fn;
+    LogBackup::apply_idle_fn = apply_idle_fn;
     fence();
 
     nrecv_threads = nthreads;
@@ -348,10 +348,10 @@ int LogApply::listen(unsigned nthreads, int start_port, std::function<void()> ap
     return 0;
 }
 
-void LogApply::stop() {
+void LogBackup::stop() {
 }
 
-void *LogApply::receiver(void* argsptr) {
+void *LogBackup::receiver(void* argsptr) {
     RecvThread &thr = *(RecvThread *) argsptr;
 
     std::vector<char *> buffer_pool;
@@ -434,7 +434,7 @@ void *LogApply::receiver(void* argsptr) {
         - List of entries (type specific format)
 */
 volatile int i, j;
-bool LogApply::read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatch &batch) {
+bool LogBackup::read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatch &batch) {
     if (buffer_pool.empty()) {
         batch.buf = new char[STO_LOG_BUF_SIZE];
     } else {
@@ -476,7 +476,7 @@ bool LogApply::read_batch(int sock_fd, std::vector<char *> &buffer_pool, LogBatc
     return true;
 }
 
-void *LogApply::applier(void *argsptr) {
+void *LogBackup::applier(void *argsptr) {
     ApplyThread &thr = *(ApplyThread *) argsptr;
     std::queue<LogBatch> batches;
 
@@ -549,13 +549,13 @@ void *LogApply::applier(void *argsptr) {
     }
 }
 
-void LogApply::default_apply_idle_fn(uint64_t tid) {
+void LogBackup::default_apply_idle_fn(uint64_t tid) {
     (void) tid;
     usleep(1000);
 }
 
 // returns true if there may still be unprocessed log entries <= max_tid
-bool LogApply::process_batch_part(LogBatch &batch, uint64_t max_tid) {
+bool LogBackup::process_batch_part(LogBatch &batch, uint64_t max_tid) {
     while (batch.start < batch.end) {
         uint64_t tid;
         Serializer<uint64_t>::deserialize(batch.start, tid);
@@ -566,7 +566,7 @@ bool LogApply::process_batch_part(LogBatch &batch, uint64_t max_tid) {
     return batch.max_tid < max_tid;
 }
 
-char *LogApply::process_txn(char *ptr) {
+char *LogBackup::process_txn(char *ptr) {
     ApplyThread &thr = apply_threads[TThread::id()];
     txns_processed[thr.thread_id]++;
 
@@ -619,7 +619,7 @@ char *LogApply::process_txn(char *ptr) {
     return ptr;
 }
 
-int LogApply::advance() {
+int LogBackup::advance() {
     assert(apply_state == ApplyState::IDLE);
     fence();
 
@@ -679,7 +679,7 @@ int LogApply::advance() {
     return 0;
 }
 
-void *LogApply::advancer(void *) {
+void *LogBackup::advancer(void *) {
     // spin until all sockets are connected
     while (true) {
         bool wait = false;
@@ -712,13 +712,13 @@ void *LogApply::advancer(void *) {
     return nullptr;
 }
 
-void LogApply::run_cleanup() {
+void LogBackup::run_cleanup() {
     ApplyThread &thr = apply_threads[TThread::id()];
     for (std::function<void()> callback : thr.cleanup_callbacks)
         callback();
     thr.cleanup_callbacks.clear();
 }
 
-void LogApply::cleanup(std::function<void()> callback) {
+void LogBackup::cleanup(std::function<void()> callback) {
     apply_threads[TThread::id()].cleanup_callbacks.push_back(callback);
 }

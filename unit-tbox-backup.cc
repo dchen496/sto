@@ -12,10 +12,10 @@ const int niters = 2000000;
 void test_simple_int(int batch) {
     TBox<int> f;
     Transaction::register_object(f, 0);
-    assert(LogApply::listen(1, port) == 0);
+    assert(LogBackup::listen(1, port) == 0);
 
     assert(f.nontrans_read() == batch ? 69 : 19);
-    assert(LogApply::txns_processed[0] == 20);
+    assert(LogBackup::txns_processed[0] == 20);
 
     Transaction::clear_registered_objects();
     printf("BACKUP PASS: %s(%d)\n", __FUNCTION__, batch);
@@ -30,9 +30,9 @@ void test_many_writes(int batch) {
         Transaction::register_object(fs[i], i);
         Transaction::register_object(refs[i], i + n);
     }
-    assert(LogApply::listen(1, port) == 0);
+    assert(LogBackup::listen(1, port) == 0);
 
-    assert(LogApply::txns_processed[0] == niters + 1);
+    assert(LogBackup::txns_processed[0] == niters + 1);
     for (int i = 0; i < n; i++)
         assert(fs[i].nontrans_read() == refs[i].nontrans_read());
 
@@ -54,13 +54,13 @@ void test_multithreaded(int batch) {
     for (int i = 0; i < nthread; i++)
         Transaction::register_object(ntxns[i], i + 2 * n);
 
-    assert(LogApply::listen(nthread, port) == 0);
+    assert(LogBackup::listen(nthread, port) == 0);
 
     for (int i = 0; i < n; i++)
         assert(fs[i].nontrans_read() == refs[i].nontrans_read());
 
     for (int i = 0; i < nthread; i++)
-        assert((int) LogApply::txns_processed[i] == ntxns[i].nontrans_read());
+        assert((int) LogBackup::txns_processed[i] == ntxns[i].nontrans_read());
 
     Transaction::clear_registered_objects();
     printf("BACKUP PASS: %s(%d)\n", __FUNCTION__, batch);
@@ -70,10 +70,10 @@ void test_multithreaded(int batch) {
 void test_simple_string() {
     TBox<std::string> f;
     Transaction::register_object(f, 0);
-    assert(LogApply::listen(1, port) == 0);
+    assert(LogBackup::listen(1, port) == 0);
 
     assert(f.nontrans_read() == "19");
-    assert(LogApply::txns_processed[0] == 20);
+    assert(LogBackup::txns_processed[0] == 20);
 
     Transaction::clear_registered_objects();
     printf("BACKUP PASS: %s()\n", __FUNCTION__);

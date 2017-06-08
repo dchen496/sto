@@ -188,7 +188,7 @@ void test_multithreaded(bool enable_logging) {
         Transaction::register_object(tree, 0);
         for (int i = 0; i < nthreads; i++)
             Transaction::register_object(valid_keys_boxes[i], i + 1);
-        assert(LogSend::init_logging(nthreads, {backup_host}, start_port) == 0);
+        assert(LogPrimary::init_logging(nthreads, {backup_host}, start_port) == 0);
     }
 
     std::vector<pthread_t> thrs(nthreads);
@@ -216,10 +216,10 @@ void test_multithreaded(bool enable_logging) {
     // also gives it some time to catch up if it's a batch or two behind
     if (enable_logging) {
       for (int i = 0; i < nthreads; i++)
-        LogSend::set_active(false, i);
+        LogPrimary::set_active(false, i);
       usleep(100000);
       for (int i = 0; i < nthreads; i++)
-        LogSend::set_active(true, i);
+        LogPrimary::set_active(true, i);
     }
 
     printf("starting\n");
@@ -248,7 +248,7 @@ void test_multithreaded(bool enable_logging) {
     printf("done\n");
 
     if (enable_logging)
-        LogSend::stop();
+        LogPrimary::stop();
 
     Transaction::clear_registered_objects();
     printf("PRIMARY PASS: %s()\n", __FUNCTION__);

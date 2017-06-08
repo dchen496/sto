@@ -9,7 +9,7 @@
 #define LOG_CPU_PIN 0
 //#define LOG_CPU_PIN 8
 
-class LogSend {
+class LogPrimary {
     struct LogBatch {
         uint64_t max_tid;
         char *buf;
@@ -50,7 +50,7 @@ private:
     static WorkerThread worker_threads[MAX_THREADS];
 };
 
-class LogApply {
+class LogBackup {
     struct ThreadArgs {
         int thread_id;
     };

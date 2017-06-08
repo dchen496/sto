@@ -207,7 +207,6 @@ struct __attribute__((aligned(128))) threadinfo_t {
     char *send_log_buf;
     int send_log_buf_used;
     TransactionTid::type max_logged_tid;
-    TransactionTid::type max_synced_tid;
     log_stats_t log_stats;
 
     threadinfo_t() :
@@ -217,7 +216,6 @@ struct __attribute__((aligned(128))) threadinfo_t {
         send_log_buf(nullptr),
         send_log_buf_used(0),
         max_logged_tid(0),
-        max_synced_tid(0),
         log_stats() {
     }
 
@@ -716,7 +714,7 @@ private:
 
     void hard_check_opacity(TransItem* item, TransactionTid::type t);
     void stop(bool committed, unsigned* writes, unsigned nwrites);
-    void append_log_entry(unsigned* writes, unsigned nwrites);
+    void append_log_record(unsigned* writes, unsigned nwrites);
 
     friend class TransProxy;
     friend class TransItem;
